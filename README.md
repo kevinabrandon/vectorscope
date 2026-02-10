@@ -159,8 +159,10 @@ All commands share these:
 | `--secs` | varies | Trace cycle duration |
 | `--amp` | 0.7 | Output amplitude (0-1) |
 | `--device` | - | Audio output device |
-| `--noise` | 0 | Noise mix (0-1) |
+| `--noise` | 0 | Noise level (0-1), default for types without explicit level |
 | `--fade-period` | 10 | Noise fade cycle (seconds) |
+| `--noise-type` | white | Noise algorithm (see below) |
+| `--noise-mode` | sum | How to combine multiple types: `sum` or `cycle` |
 
 ### Noise
 
@@ -170,6 +172,54 @@ Add `--noise` for a fading static effect - like picking up a signal from deep sp
 vectorscope clock --noise 0.5 --fade-period 8
 vectorscope fractal sierpinski --noise 0.3
 ```
+
+#### Noise Types
+
+| Type | Effect |
+|------|--------|
+| `white` | Uniform random scatter - classic TV static |
+| `perlin` | Smooth organic deformation - shapes breathe and morph |
+| `brownian` | Slow drifting deformation - like the shape is made of jelly |
+| `correlated` | Circular XY scatter - round halo instead of boxy fuzz |
+| `pink` | 1/f noise - natural, flowing feel with emphasis on lower frequencies |
+| `normal` | Fuzzy/glowing edges - displaces points perpendicular to the path |
+| `sample-hold` | Stepped glitch - holds random offsets then jumps |
+| `burst` | Intermittent static - clean signal with brief explosions of noise |
+| `ring` | Ring modulation - creates intensity gaps and inversions along the trace |
+| `harmonic` | Shimmer - irrational-ratio sine waves that drift endlessly |
+
+```bash
+vectorscope circle --noise 0.5 --noise-type perlin
+vectorscope fractal koch --noise 0.3 --noise-type normal
+vectorscope text "Hello" --noise 0.4 --noise-type harmonic
+```
+
+#### Combining Noise Types
+
+Comma-separate types to layer them. Each type can have its own level with `:level`, otherwise it uses `--noise` as the default:
+
+```bash
+# Organic deformation + subtle fuzzy edges
+vectorscope circle --noise-type perlin:0.4,normal:0.05
+
+# Three types, each at its own intensity
+vectorscope fractal koch --noise-type perlin:0.3,ring:0.2,normal:0.05
+
+# Mix explicit levels with a default
+vectorscope circle --noise 0.3 --noise-type perlin:0.4,normal
+```
+
+Use `--noise-mode cycle` to rotate through types instead of layering, switching each fade period:
+
+```bash
+# Cycle through all types
+vectorscope circle --noise 0.5 --noise-type all --noise-mode cycle
+
+# Cycle through a specific set
+vectorscope circle --noise-type perlin:0.4,normal:0.05,ring:0.3 --noise-mode cycle
+```
+
+The current noise type is printed to the terminal when cycling.
 
 ---
 
