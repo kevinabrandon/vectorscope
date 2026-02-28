@@ -25,7 +25,9 @@ from .circle import CirclePlayer
 from .text import TextPlayer, build_xy_from_text
 from .spiral import SpiralPlayer
 from .clock import ClockPlayer
+from .ngon import NgonPlayer
 from .fractal import FractalPlayer
+from .platonic import PlatonicPlayer
 
 __all__ = [
     # Base
@@ -37,7 +39,9 @@ __all__ = [
     "TextPlayer",
     "SpiralPlayer",
     "ClockPlayer",
+    "NgonPlayer",
     "FractalPlayer",
+    "PlatonicPlayer",
     # Utilities
     "build_xy_from_text",
     # Meta

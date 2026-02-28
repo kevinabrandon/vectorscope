@@ -8,12 +8,11 @@ from .base import VectorScopePlayer
 class SpiralPlayer(VectorScopePlayer):
     """Hypnotic rotating spiral - stare at it and get sleepy..."""
 
-    def __init__(self, arms=3, turns=5, speed=0.5, direction=1, **kwargs):
+    def __init__(self, arms=3, turns=5, rot_freq=0.5, **kwargs):
         super().__init__(**kwargs)
         self.arms = arms
         self.turns = turns
-        self.speed = speed
-        self.direction = direction
+        self.rot_freq = rot_freq
         self._generate_spiral()
 
     def _generate_spiral(self):
@@ -32,25 +31,20 @@ class SpiralPlayer(VectorScopePlayer):
             all_points.append(np.column_stack([x, y]))
 
         self.base_spiral = np.vstack(all_points).astype(np.float32)
+        self.xy_data = self.base_spiral
 
     def audio_callback(self, outdata, frames, time, status):
-        """Custom callback that applies rotation to the spiral."""
-        if status:
-            print(f"Audio status: {status}")
+        """Fill from xy_data (supports animate-freq) then apply rotation."""
+        self._check_status(status)
 
-        spiral_len = len(self.base_spiral)
+        self._fill_buffer(outdata, frames)
 
-        # Get spiral points for this chunk (vectorized)
-        indices = (self.global_sample + np.arange(frames)) % spiral_len
-        xy = self.base_spiral[indices]
-        x, y = xy[:, 0], xy[:, 1]
-
-        # Rotation angles for each sample (vectorized)
+        # Rotation angles for each sample
         t_samples = (self.global_sample + np.arange(frames)) / self.sample_rate
-        angles = self.direction * 2 * np.pi * self.speed * t_samples
+        angles = 2 * np.pi * self.rot_freq * t_samples
         cos_a, sin_a = np.cos(angles), np.sin(angles)
 
-        # Apply rotation (vectorized)
+        x, y = outdata[:, 0].copy(), outdata[:, 1].copy()
         outdata[:, 0] = (x * cos_a - y * sin_a) * self.amp
         outdata[:, 1] = (x * sin_a + y * cos_a) * self.amp
 
@@ -58,8 +52,8 @@ class SpiralPlayer(VectorScopePlayer):
         self.global_sample += frames
 
     def _on_start(self):
-        print(f"🌀 Spiral: {self.arms} arms, {self.turns} turns, {self.speed} Hz rotation")
-        dir_str = "↺ counter-clockwise" if self.direction < 0 else "↻ clockwise"
+        print(f"🌀 Spiral: {self.arms} arms, {self.turns} turns, {self.rot_freq} Hz rotation")
+        dir_str = "↺ counter-clockwise" if self.rot_freq < 0 else "↻ clockwise"
         print(f"  {dir_str}")
         print("  You are getting sleepy... Press Ctrl+C to wake up.")
 

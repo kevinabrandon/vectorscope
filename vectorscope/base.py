@@ -1,8 +1,23 @@
 """Base class for real-time oscilloscope XY display."""
 
 import argparse
+import ctypes
+import time as _time
+
 import numpy as np
 import sounddevice as sd
+
+# Suppress ALSA's C-level error messages (underrun warnings etc.)
+# by installing a no-op error handler via ctypes.
+try:
+    _alsa_err_t = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
+                                   ctypes.c_char_p, ctypes.c_int,
+                                   ctypes.c_char_p)
+    _alsa_err_handler = _alsa_err_t(lambda *a: None)
+    ctypes.cdll.LoadLibrary('libasound.so.2').snd_lib_error_set_handler(
+        _alsa_err_handler)
+except (OSError, AttributeError):
+    pass  # not Linux / ALSA not available
 
 NOISE_TYPES = [
     'white', 'perlin', 'brownian', 'correlated', 'pink',
@@ -23,19 +38,25 @@ class VectorScopePlayer:
     - Overriding audio_callback() (for dynamic/animated patterns)
     """
 
-    def __init__(self, sample_rate=48000, secs=0.05, amp=0.7, device=None,
+    def __init__(self, sample_rate=48000, freq=100, amp=0.7, device=None,
                  noise=0.0, fade_period=10.0, noise_type='white',
-                 noise_mode='sum'):
+                 noise_mode='sum', animate_freq_range=None, freq_sign=1):
         self.sample_rate = sample_rate
-        self.secs = secs
+        self.freq = abs(freq)
+        self.secs = 1.0 / self.freq
         self.amp = amp
         self.device = device
         self.noise = noise
         self.fade_period = fade_period
-        self.samples = int(sample_rate * secs)
+        self.animate_freq_range = animate_freq_range
+        self.samples = int(sample_rate * self.secs)
         self.xy_data = None
         self.position = 0
         self.global_sample = 0
+        self._stream_start_time = _time.monotonic()
+        self._last_status_time = 0.0
+        self._last_trace_phase = 0.0
+        self._frac_position = 0.0
 
         # Parse noise type(s): "name", "name:level", comma-separated, or "all"
         raw = noise_type or 'white'
@@ -282,7 +303,7 @@ class VectorScopePlayer:
         interference that drifts endlessly.
         """
         phi = (1 + np.sqrt(5)) / 2  # golden ratio
-        base = 1.0 / self.secs
+        base = self.freq
         freqs = [base * phi, base * np.sqrt(2), base * np.e, base * np.pi]
         amps_list = [0.4, 0.3, 0.2, 0.1]
 
@@ -393,28 +414,89 @@ class VectorScopePlayer:
         outdata[:, 1] += ny * displacement
 
     # ------------------------------------------------------------------
+    # Trace frequency animation
+    # ------------------------------------------------------------------
+
+    def _get_animated_freq(self, frames):
+        """Return per-sample frequency array (animated) or scalar (static)."""
+        if self.animate_freq_range is None:
+            return self.freq
+        t = (self.global_sample + np.arange(frames)) / self.sample_rate
+        lfo = 0.5 - 0.5 * np.cos(2 * np.pi * t / self.fade_period)
+        f_min, f_max = self.animate_freq_range
+        return f_min + lfo * (f_max - f_min)
+
+    def _compute_trace_phase(self, frames):
+        """Return cumulative trace phase (cycle count, unwrapped).
+
+        Uses phase integration when animated for smooth frequency changes,
+        or direct freq * t when static.
+        """
+        if self.animate_freq_range is not None:
+            freq = self._get_animated_freq(frames)
+            phase_inc = freq / self.sample_rate
+            phase = self._last_trace_phase + np.cumsum(phase_inc)
+            self._last_trace_phase = phase[-1]
+            return phase
+        t = (self.global_sample + np.arange(frames)) / self.sample_rate
+        return self.freq * t
+
+    # ------------------------------------------------------------------
     # Buffer / callback / run
     # ------------------------------------------------------------------
 
     def _fill_buffer(self, outdata, frames):
-        """Fill output buffer by looping through xy_data."""
+        """Fill output buffer by looping through xy_data.
+
+        When animate_freq_range is set, uses variable-speed fractional
+        indexing with linear interpolation for smooth speed changes.
+        """
         if self.xy_data is None:
             outdata.fill(0)
             return
 
         data_len = len(self.xy_data)
-        out_idx = 0
 
-        while out_idx < frames:
-            chunk_size = min(frames - out_idx, data_len - self.position)
-            outdata[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
-            self.position = (self.position + chunk_size) % data_len
-            out_idx += chunk_size
+        if self.animate_freq_range is not None:
+            # Variable-speed playback via fractional position stepping
+            freq = self._get_animated_freq(frames)
+            # step_rate: how many xy_data samples to advance per audio sample
+            # At base freq (self.freq), step_rate = 1.0 (normal speed)
+            step_rate = freq * (data_len / self.sample_rate)
+            # Cumulative fractional positions
+            positions = self._frac_position + np.cumsum(step_rate)
+            self._frac_position = positions[-1] % data_len
+            positions = positions % data_len
+            idx0 = positions.astype(int) % data_len
+            idx1 = (idx0 + 1) % data_len
+            frac = (positions - np.floor(positions)).astype(np.float32)
+            outdata[:] = (self.xy_data[idx0] * (1 - frac[:, np.newaxis]) +
+                          self.xy_data[idx1] * frac[:, np.newaxis])
+        else:
+            out_idx = 0
+            while out_idx < frames:
+                chunk_size = min(frames - out_idx, data_len - self.position)
+                outdata[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
+                self.position = (self.position + chunk_size) % data_len
+                out_idx += chunk_size
+
+    def _check_status(self, status):
+        """Log audio status, suppressing startup underruns and rate-limiting."""
+        if not status:
+            return
+        now = _time.monotonic()
+        # Suppress during the first 0.5s (ALSA device may still be settling)
+        if now - self._stream_start_time < 0.5:
+            return
+        # Rate-limit to one message per second
+        if now - self._last_status_time < 1.0:
+            return
+        self._last_status_time = now
+        print(f"Audio status: {status}")
 
     def audio_callback(self, outdata, frames, time, status):
         """Sounddevice callback. Override for custom behavior."""
-        if status:
-            print(f"Audio status: {status}")
+        self._check_status(status)
 
         self._fill_buffer(outdata, frames)
         self._apply_noise(outdata, frames)
@@ -430,27 +512,38 @@ class VectorScopePlayer:
 
     def run(self):
         """Start the audio stream."""
-        with sd.OutputStream(
+        self._stream_start_time = _time.monotonic()
+        self._last_status_time = 0.0
+        stream = sd.OutputStream(
             samplerate=self.sample_rate,
             channels=2,
             dtype='float32',
             callback=self.audio_callback,
-            device=self.device
-        ):
-            self._on_start()
-            try:
-                while True:
-                    sd.sleep(1000)
-            except KeyboardInterrupt:
-                self._on_stop()
+            device=self.device,
+            latency='high',
+        )
+        stream.start()
+        self._on_start()
+        try:
+            while True:
+                sd.sleep(1000)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stream.stop()
+            stream.close()
+            self._on_stop()
 
 
-def add_common_args(parser, secs_default=0.05):
-    """Add common arguments to an argument parser."""
+def add_common_args(parser, freq_default=100):
+    """Add common arguments to an argument parser.
+
+    freq_default sets the default trace frequency for the command.
+    """
     parser.add_argument("--rate", type=int, default=48000,
                         help="Sample rate in Hz")
-    parser.add_argument("--secs", type=float, default=secs_default,
-                        help="Duration of one trace cycle")
+    parser.add_argument("--freq", type=float, default=freq_default,
+                        help="Trace frequency in Hz")
     parser.add_argument("--amp", type=float, default=0.7,
                         help="Output amplitude (0-1)")
     parser.add_argument("--device", type=str, default=None,
@@ -458,7 +551,11 @@ def add_common_args(parser, secs_default=0.05):
     parser.add_argument("--noise", type=float, default=0.0,
                         help="Noise level (0-1)")
     parser.add_argument("--fade-period", type=float, default=10.0,
-                        help="Noise fade cycle in seconds")
+                        help="Fade cycle in seconds (noise and animate-freq)")
+    parser.add_argument("--animate-freq", type=float, nargs=2,
+                        metavar=('FREQ_MIN', 'FREQ_MAX'), default=None,
+                        help="Animate trace frequency between FREQ_MIN and "
+                             "FREQ_MAX over fade-period")
     parser.add_argument("--noise-type", type=str, default="white",
                         help="Noise algorithm (%(default)s). Options: "
                              + ", ".join(NOISE_TYPES)
@@ -475,11 +572,13 @@ def common_args_from_parsed(args):
     """Extract common arguments as a dict for passing to VectorScopePlayer."""
     return {
         'sample_rate': args.rate,
-        'secs': args.secs,
+        'freq': args.freq,
         'amp': args.amp,
         'device': args.device,
         'noise': args.noise,
         'fade_period': args.fade_period,
         'noise_type': args.noise_type,
         'noise_mode': args.noise_mode,
+        'animate_freq_range': args.animate_freq,
+        'freq_sign': -1 if args.freq < 0 else 1,
     }

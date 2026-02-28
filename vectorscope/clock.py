@@ -42,8 +42,7 @@ class ClockPlayer(VectorScopePlayer):
 
     def audio_callback(self, outdata, frames, time, status):
         """Custom callback that checks for time updates."""
-        if status:
-            print(f"Audio status: {status}")
+        self._check_status(status)
 
         self._update_time()
         self._fill_buffer(outdata, frames)
