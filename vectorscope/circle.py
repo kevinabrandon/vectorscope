@@ -13,32 +13,29 @@ class CirclePlayer(VectorScopePlayer):
     frequency, it's a constant delay, not a frequency-dependent issue).
     """
 
-    def __init__(self, freq=100, freq_min=None, freq_max=None, sweep_rate=0.1,
-                 direction=1, **kwargs):
+    def __init__(self, freq_min=None, freq_max=None, sweep_rate=0.1,
+                 **kwargs):
         super().__init__(**kwargs)
-        self.freq = freq
+        self.direction = -1 if kwargs.get('freq_sign', 1) < 0 else 1
         self.freq_min = freq_min
         self.freq_max = freq_max
         self.sweep_rate = sweep_rate
-        self.direction = direction
         self.sweep_mode = freq_min is not None and freq_max is not None
         self._last_phase = 0
 
     def audio_callback(self, outdata, frames, time, status):
         """Generate circle in real-time with optional frequency sweep."""
-        if status:
-            print(f"Audio status: {status}")
-
-        t = (self.global_sample + np.arange(frames)) / self.sample_rate
+        self._check_status(status)
 
         if self.sweep_mode:
+            t = (self.global_sample + np.arange(frames)) / self.sample_rate
             freq = self.freq_min + (self.freq_max - self.freq_min) * \
                    (0.5 + 0.5 * np.sin(2 * np.pi * self.sweep_rate * t))
             phase = 2 * np.pi * np.cumsum(freq) / self.sample_rate
             phase += self._last_phase
             self._last_phase = phase[-1]
         else:
-            phase = 2 * np.pi * self.freq * t
+            phase = 2 * np.pi * self._compute_trace_phase(frames)
 
         phase *= self.direction
 

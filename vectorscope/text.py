@@ -1,6 +1,5 @@
 """Text rendering for oscilloscope XY display."""
 
-import threading
 import numpy as np
 import soundfile as sf
 
@@ -121,6 +120,51 @@ def resample_polyline(p, n):
     return np.column_stack((x,y))
 
 
+def _optimize_contour_order(polys):
+    """Reorder contours and rotate closed ones to minimize beam travel.
+
+    For each contour after the first, rotates the polyline so tracing
+    begins at the point closest to where the previous contour ended.
+    Then reorders contours greedily by nearest start point.
+    """
+    if len(polys) <= 1:
+        return polys
+
+    def _rotate_to_nearest(poly, target):
+        """Rotate a closed polyline so it starts nearest to target."""
+        if not np.allclose(poly[0], poly[-1], atol=1e-10):
+            return poly  # open contour, can't rotate
+        # Exclude duplicate closing point for distance calc
+        dists = ((poly[:-1] - target) ** 2).sum(axis=1)
+        best = int(np.argmin(dists))
+        if best == 0:
+            return poly
+        return np.vstack([poly[best:-1], poly[:best + 1]])
+
+    # Greedy nearest-neighbor ordering
+    remaining = list(range(len(polys)))
+    ordered = [remaining.pop(0)]
+    while remaining:
+        prev_end = polys[ordered[-1]][-1]
+        best_idx = min(remaining,
+                       key=lambda j: ((polys[j][0] - prev_end) ** 2).sum())
+        remaining.remove(best_idx)
+        ordered.append(best_idx)
+
+    # Rotate each contour to start near previous end
+    result = [polys[ordered[0]]]
+    for k in range(1, len(ordered)):
+        prev_end = result[-1][-1]
+        result.append(_rotate_to_nearest(polys[ordered[k]], prev_end))
+
+    # Rotate the first contour to start near where the last one ends,
+    # so the overall loop also closes cleanly.
+    last_end = result[-1][-1]
+    result[0] = _rotate_to_nearest(result[0], last_end)
+
+    return result
+
+
 def build_xy_from_text(text, font_size=1.0, font_family="DejaVu Sans", curve_pts=30,
                        samples=48000*5, pen_lift_samples=300):
     """Convert text to XY coordinate array for oscilloscope display."""
@@ -138,41 +182,36 @@ def build_xy_from_text(text, font_size=1.0, font_family="DejaVu Sans", curve_pts
         return np.zeros((samples, 2), dtype=np.float64)
 
     polys = normalize_polylines(polys)
+    polys = _optimize_contour_order(polys)
 
-    # Allocate samples across contours proportionally to contour length
+    # Allocate samples across contours proportionally to arc length
+    pen_lift_total = pen_lift_samples * max(0, len(polys) - 1)
+    contour_budget = samples - pen_lift_total
+
     lengths = []
     for p in polys:
         d = np.diff(p, axis=0)
         lengths.append(float(np.sqrt((d**2).sum(axis=1)).sum()))
     total_len = sum(lengths) if lengths else 1.0
 
-    # Build XY sequence with pen lifts
+    # Build XY sequence with pen lifts between contours
     out = []
-    for p, L in zip(polys, lengths):
-        n = int(max(10, (samples - pen_lift_samples*len(polys)) * (L / total_len)))
+    for i, (p, L) in enumerate(zip(polys, lengths)):
+        n = int(max(10, contour_budget * (L / total_len)))
         pts = resample_polyline(p, n)
         out.append(pts)
-        out.append(np.zeros((pen_lift_samples, 2), dtype=np.float64))
+        if pen_lift_samples > 0 and i < len(polys) - 1:
+            out.append(np.zeros((pen_lift_samples, 2), dtype=np.float64))
 
-    xy = np.vstack(out) if out else np.zeros((samples,2), dtype=np.float64)
-
-    # Seamless loop: smoothly return to the starting point
-    return_samples = max(1, int(0.05 * samples))
-    start = xy[0].copy()
-    end = xy[-1].copy()
-
-    u = np.linspace(0.0, 1.0, return_samples, endpoint=False)
-    w = 0.5 - 0.5 * np.cos(np.pi * u)
-    ret = (1.0 - w)[:, None] * end + w[:, None] * start
-
-    xy = np.vstack([xy, ret])
+    xy = np.vstack(out) if out else np.zeros((samples, 2), dtype=np.float64)
 
     if len(xy) < samples:
-        pad = np.zeros((samples - len(xy), 2), dtype=np.float64)
+        pad = np.tile(xy[-1], (samples - len(xy), 1))
         xy = np.vstack([xy, pad])
     else:
         xy = xy[:samples]
 
+    # Force seamless loop wrap
     xy[-1] = xy[0]
 
     return xy
@@ -182,13 +221,12 @@ class TextPlayer(VectorScopePlayer):
     """Real-time text display with interactive input."""
 
     def __init__(self, text="Hello", font="DejaVu Sans", curve_pts=30,
-                 pen_lift_samples=0, interactive=False, **kwargs):
+                 pen_lift_samples=0, **kwargs):
         super().__init__(**kwargs)
         self.text = text
         self.font = font
         self.curve_pts = curve_pts
         self.pen_lift_samples = pen_lift_samples
-        self.interactive = interactive
         self._update_text(text)
 
     def _update_text(self, text):
@@ -204,31 +242,14 @@ class TextPlayer(VectorScopePlayer):
         self.xy_data = np.clip(xy * self.amp, -1.0, 1.0).astype(np.float32)
         self.position = 0
 
-    def _input_loop(self):
-        """Background thread that reads input and updates text."""
-        while True:
-            try:
-                line = input()
-                if line:
-                    print(f"Text: {line}")
-                    self._update_text(line)
-            except EOFError:
-                break
-
     def _on_start(self):
-        if self.interactive:
-            print(f"Displaying: {self.text}")
-            print("Type new text and press Enter to update (Ctrl+C to quit)")
-            self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
-            self._input_thread.start()
-        else:
-            print(f"Displaying: {self.text}")
-            print("Press Ctrl+C to stop.")
+        print(f"Displaying: {self.text}")
+        print("Press Ctrl+C to stop.")
 
 
-def generate_wav(text, output, rate, secs, amp, font, curve_pts, penlift):
+def generate_wav(text, output, rate, freq, amp, font, curve_pts, penlift):
     """Generate a WAV file."""
-    samples = int(rate * secs)
+    samples = int(rate / abs(freq))
     xy = build_xy_from_text(
         text,
         font_size=1.0,
