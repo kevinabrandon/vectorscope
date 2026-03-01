@@ -10,6 +10,7 @@ from .cli import _create_player
 # Params that are stream-level or internal — not changeable mid-session.
 _HIDDEN_PARAMS = frozenset({
     'rate', 'device', 'command', 'out', 'interactive',
+    'channels',
 })
 
 
@@ -21,6 +22,7 @@ class InteractiveSession:
         self._subparsers = subparsers  # dict: command name -> subparser
         self._sample_rate = args.rate
         self._device = args.device
+        self._channels = args.channels
         self._command_names = sorted(self._subparsers.keys())
         self.current_player = None
         self.current_args = None
@@ -44,7 +46,7 @@ class InteractiveSession:
     def run(self):
         stream = sd.OutputStream(
             samplerate=self._sample_rate,
-            channels=2,
+            channels=self._channels,
             dtype='float32',
             callback=self.audio_callback,
             device=self._device,
@@ -106,6 +108,9 @@ class InteractiveSession:
         # Force stream-level params to match our stream
         args.rate = self._sample_rate
         args.device = self._device
+        args.channels = self._channels
+        if not hasattr(args, 'z_blank'):
+            args.z_blank = True
 
         # Drop to silence while building the new player — player creation
         # can be CPU-heavy (text rendering, fractals) and would starve
@@ -175,6 +180,7 @@ class InteractiveSession:
         # Force stream-level params
         self.current_args.rate = self._sample_rate
         self.current_args.device = self._device
+        self.current_args.channels = self._channels
 
         # Silence during rebuild (see _switch_command comment)
         self.current_player = None

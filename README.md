@@ -7,6 +7,8 @@ Connect your audio L/R to scope CH1/CH2, set to XY mode, and go.
 ```
 Left channel  → X axis
 Right channel → Y axis
+Channel 3     → Z axis (intensity, optional)
+Channel 4     → spare (zeroed)
 ```
 
 ---
@@ -48,6 +50,7 @@ vectorscope clock
 vectorscope fractal dragon
 vectorscope platonic icosahedron
 vectorscope spirograph --R 5 --r 3 --rot-freq 0.2
+vectorscope zcal --channels 4
 vectorscope interactive
 ```
 
@@ -70,6 +73,7 @@ A live REPL that lets you switch between any command and tweak parameters while 
 vectorscope interactive
 vectorscope interactive --rate 44100
 vectorscope interactive --device "USB Audio"
+vectorscope interactive --channels 4
 ```
 
 Inside the REPL:
@@ -82,18 +86,20 @@ Inside the REPL:
 > perspective=2
 > ngon --sides 6 --rot-freq 0.5
 > sides=8
+> z_amp=0.8 z_delay=100000
 > spiral
 > help
 > fractal dragon
 > hershey "Hello" --font futural
 ```
 
-Type a command name (with optional arguments) to switch. Change parameters with `key=value`. Type `help` to see available commands and current parameter values. Ctrl+C to exit.
+Type a command name (with optional arguments) to switch. Change parameters with `key=value`. Type `help` to see available commands and current parameter values. Z-channel params (`z_amp`, `z_delay`) are adjustable live. Ctrl+C to exit.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rate` | 48000 | Sample rate (Hz) |
 | `--device` | - | Audio output device |
+| `--channels` | 2 | Output channels (2=XY, 4=XY+Z+spare) |
 
 ---
 
@@ -254,7 +260,6 @@ vectorscope platonic cube --perspective 10        # nearly orthographic
 | `--rz` | - | Z-axis rotation override |
 | `--freq` | 100 | Trace frequency in Hz |
 | `--perspective` | 3.0 | Camera distance (higher = flatter) |
-| `--smooth` | 6 | Trace smoothing at vertices (0=sharp) |
 | `--penlift` | 4 | Silence samples between edges |
 
 ---
@@ -280,6 +285,106 @@ vectorscope spirograph --animate-d 0.2 1.5 --fade-period 8
 | `--freq` | 100 | Trace frequency in Hz |
 | `--rot-freq` | 0 | Rotation frequency in Hz (0=static, negative=CCW) |
 | `--animate-d` | - | Animate d between D_MIN and D_MAX over fade period |
+
+---
+
+### zcal
+
+Z-channel calibration patterns. Requires `--channels >= 3`.
+
+```bash
+vectorscope zcal --channels 4                    # delay mode (default)
+vectorscope zcal --channels 4 --mode intensity   # intensity ramp
+vectorscope zcal --channels 4 --mode blanking    # blanking test
+vectorscope zcal --channels 4 --z-delay 100000    # test delay compensation (~100us)
+```
+
+**Modes:**
+
+| Mode | Pattern | What to check |
+|------|---------|---------------|
+| `delay` | Circle, half bright / half dark | Adjust `--z-delay` until boundary is at 12 o'clock |
+| `intensity` | Circle with 0→1 intensity ramp | Verify polarity and range |
+| `blanking` | Square with blanked gaps | Verify gaps are invisible |
+
+---
+
+## Z-Channel (Intensity Modulation)
+
+If your audio interface has 4+ channels and your oscilloscope has a Z-axis (intensity) input, you can use the Z-channel for beam blanking and intensity control.
+
+```bash
+# Enable Z output (channels 3+4)
+vectorscope platonic --channels 4
+vectorscope text "Hello" --channels 4 --penlift 20
+vectorscope hershey "Test" --channels 4
+vectorscope clock --channels 4
+
+# Adjust Z amplitude
+vectorscope platonic --channels 4 --z-amp 0.8
+
+# Compensate for channel delay
+vectorscope platonic --channels 4 --z-delay 100000
+
+# Disable pen-lift blanking
+vectorscope text "Hi" --channels 4 --no-z-blank
+```
+
+The Z output maps intensity to voltage: bright = negative, dark/blanked = positive (matching typical scope Z-input polarity where positive voltage decreases intensity). The actual voltage depends on your audio interface gain; you may need an external amplifier to reach the ~5V many scopes need.
+
+**Per-player features:**
+- **Platonic**: Depth shading (near faces bright, far faces dim) + pen-lift blanking
+- **Text / Hershey / Clock**: Pen-lift blanking between strokes
+- **Circle, Ngon, Spiral, Spirograph, Fractal**: Full brightness (continuous traces, no blanking)
+
+Use `zcal` to calibrate your setup.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--channels` | 2 | Output channels (2=XY, 4=XY+Z+spare) |
+| `--z-amp` | 1.0 | Z output amplitude (0-1) |
+| `--z-delay` | 0 | Z delay compensation in nanoseconds (+earlier, -later) |
+| `--no-z-blank` | - | Disable pen-lift blanking on Z |
+
+---
+
+## Persistent Config
+
+Store hardware/calibration defaults in `~/.config/vectorscope/config.json` so you don't have to re-type them every time. CLI args always override config values.
+
+Supported keys: `device`, `rate`, `channels`, `z_delay`, `z_amp`.
+
+### Manage config
+
+```bash
+# Save values
+vectorscope config save --channels 4 --z-delay -100000 --z-amp 0.8
+
+# View current config
+vectorscope config
+
+# Print config file path
+vectorscope config path
+
+# Delete config file
+vectorscope config reset
+```
+
+### Save from zcal
+
+When you stop `zcal` with Ctrl+C, it will offer to save your current Z settings:
+
+```bash
+vectorscope zcal --channels 4 --z-delay -100000
+# Ctrl+C → "Save to ~/.config/vectorscope/config.json? [y/N]" → y
+```
+
+After saving, all commands pick up the stored defaults automatically:
+
+```bash
+vectorscope platonic          # uses channels=4, z_delay=-100000 from config
+vectorscope platonic --z-amp 0.5  # CLI overrides config value
+```
 
 ---
 
@@ -406,10 +511,11 @@ LissajousPlayer(freq_x=3, freq_y=2).run()
 
 ## Oscilloscope Tips
 
-- **DC coupling** on both channels
+- **DC coupling** on both channels (and Z input)
 - Same volts/div on CH1 and CH2
 - `--freq` controls trace speed: higher = brighter but lower resolution; lower = sharper detail but may flicker
 - Analog scopes look smoother but digital works fine
+- **Z-axis**: Connect channel 3 to scope Z input. Most scopes are positive-going = darker. Use `zcal` to verify and calibrate delay
 
 ---
 

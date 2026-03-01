@@ -157,11 +157,6 @@ def _optimize_contour_order(polys):
         prev_end = result[-1][-1]
         result.append(_rotate_to_nearest(polys[ordered[k]], prev_end))
 
-    # Rotate the first contour to start near where the last one ends,
-    # so the overall loop also closes cleanly.
-    last_end = result[-1][-1]
-    result[0] = _rotate_to_nearest(result[0], last_end)
-
     return result
 
 
@@ -179,13 +174,13 @@ def build_xy_from_text(text, font_size=1.0, font_family="DejaVu Sans", curve_pts
 
     if not polys:
         # Empty text - return silence
-        return np.zeros((samples, 2), dtype=np.float64)
+        return np.zeros((samples, 2), dtype=np.float64), np.zeros(samples, dtype=bool)
 
     polys = normalize_polylines(polys)
     polys = _optimize_contour_order(polys)
 
     # Allocate samples across contours proportionally to arc length
-    pen_lift_total = pen_lift_samples * max(0, len(polys) - 1)
+    pen_lift_total = pen_lift_samples * len(polys)  # between each + closing wrap
     contour_budget = samples - pen_lift_total
 
     lengths = []
@@ -196,25 +191,42 @@ def build_xy_from_text(text, font_size=1.0, font_family="DejaVu Sans", curve_pts
 
     # Build XY sequence with pen lifts between contours
     out = []
+    blanking_parts = []
     for i, (p, L) in enumerate(zip(polys, lengths)):
         n = int(max(10, contour_budget * (L / total_len)))
         pts = resample_polyline(p, n)
         out.append(pts)
+        blanking_parts.append(np.zeros(len(pts), dtype=bool))
         if pen_lift_samples > 0 and i < len(polys) - 1:
-            out.append(np.zeros((pen_lift_samples, 2), dtype=np.float64))
+            # Interpolate from end of current contour to start of next
+            start_pt = pts[-1]
+            end_pt = polys[i + 1][0]
+            t_lift = np.linspace(0, 1, pen_lift_samples, dtype=np.float64)
+            lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
+            out.append(lift)
+            blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
+
+    # Closing pen lift: wrap from end of last contour back to start of first
+    if pen_lift_samples > 0 and out:
+        start_pt = out[-1][-1]
+        end_pt = polys[0][0]
+        t_lift = np.linspace(0, 1, pen_lift_samples, dtype=np.float64)
+        lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
+        out.append(lift)
+        blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
 
     xy = np.vstack(out) if out else np.zeros((samples, 2), dtype=np.float64)
+    blanking = np.concatenate(blanking_parts) if blanking_parts else np.zeros(samples, dtype=bool)
 
     if len(xy) < samples:
         pad = np.tile(xy[-1], (samples - len(xy), 1))
         xy = np.vstack([xy, pad])
+        blanking = np.concatenate([blanking, np.zeros(samples - len(blanking), dtype=bool)])
     else:
         xy = xy[:samples]
+        blanking = blanking[:samples]
 
-    # Force seamless loop wrap
-    xy[-1] = xy[0]
-
-    return xy
+    return xy, blanking
 
 
 class TextPlayer(VectorScopePlayer):
@@ -232,7 +244,7 @@ class TextPlayer(VectorScopePlayer):
     def _update_text(self, text):
         """Regenerate XY data for new text."""
         self.text = text
-        xy = build_xy_from_text(
+        xy, blanking = build_xy_from_text(
             text,
             font_family=self.font,
             curve_pts=self.curve_pts,
@@ -240,6 +252,7 @@ class TextPlayer(VectorScopePlayer):
             pen_lift_samples=self.pen_lift_samples
         )
         self.xy_data = np.clip(xy * self.amp, -1.0, 1.0).astype(np.float32)
+        self.xy_blanking = blanking
         self.position = 0
 
     def _on_start(self):
@@ -250,7 +263,7 @@ class TextPlayer(VectorScopePlayer):
 def generate_wav(text, output, rate, freq, amp, font, curve_pts, penlift):
     """Generate a WAV file."""
     samples = int(rate / abs(freq))
-    xy = build_xy_from_text(
+    xy, _blanking = build_xy_from_text(
         text,
         font_size=1.0,
         font_family=font,
