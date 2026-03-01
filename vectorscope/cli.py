@@ -21,6 +21,9 @@ def _build_parser():
     subparsers = parser.add_subparsers(dest='command', help='Available displays')
     subs = {}
 
+    from .hershey_player import HERSHEY_FONT_NAMES
+    hershey_names = ', '.join(sorted(HERSHEY_FONT_NAMES))
+
     # Circle subcommand
     circle_parser = subparsers.add_parser(
         'circle',
@@ -44,8 +47,8 @@ def _build_parser():
     )
     text_parser.add_argument("text", nargs="?", default="Hello",
                              help="Text to display")
-    text_parser.add_argument("--font", default="DejaVu Sans",
-                             help="Font family")
+    text_parser.add_argument("--font", default="futural",
+                             help=f"Font name (Hershey: {hershey_names}; or any matplotlib font family)")
     text_parser.add_argument("--curve-pts", type=int, default=30,
                              help="Points per curve segment")
     text_parser.add_argument("--penlift", type=int, default=20,
@@ -70,11 +73,6 @@ def _build_parser():
     add_common_args(spiral_parser, freq_default=100)
     subs['spiral'] = spiral_parser
 
-    # Hershey font choices (used by clock and hershey subcommands)
-    from HersheyFonts import HersheyFonts as _HF
-    _hf_instance = _HF()
-    HERSHEY_FONT_CHOICES = list(_hf_instance.default_font_names)
-
     # Clock subcommand
     clock_parser = subparsers.add_parser(
         'clock',
@@ -83,10 +81,12 @@ def _build_parser():
     )
     clock_parser.add_argument("--24h", dest="use_24h", action="store_true",
                               help="Use 24-hour format")
-    clock_parser.add_argument("--font", default="futural", choices=HERSHEY_FONT_CHOICES,
-                              help="Hershey font style to use")
+    clock_parser.add_argument("--font", default="futural",
+                              help=f"Font name (Hershey: {hershey_names}; or any matplotlib font family)")
     clock_parser.add_argument("--penlift", type=int, default=20,
                               help="Blanked samples between strokes (0=no pen lifts)")
+    clock_parser.add_argument("--curve-pts", type=int, default=30,
+                              help="Points per curve segment (outline fonts only)")
     add_common_args(clock_parser, freq_default=100)
     subs['clock'] = clock_parser
 
@@ -160,21 +160,6 @@ def _build_parser():
                                help="Animate 'd' between D_MIN and D_MAX over fade_period")
     add_common_args(spirograph_parser, freq_default=100)
     subs['spirograph'] = spirograph_parser
-
-    # Hershey subcommand
-    hershey_parser = subparsers.add_parser(
-        'hershey',
-        help='Single-stroke Hershey font text rendering',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    hershey_parser.add_argument("text", nargs="?", default="Hershey",
-                             help="Text to display")
-    hershey_parser.add_argument("--font", default="futural", choices=HERSHEY_FONT_CHOICES,
-                             help="Hershey font style to use")
-    hershey_parser.add_argument("--penlift", type=int, default=20,
-                             help="Samples of (0,0) between strokes")
-    add_common_args(hershey_parser, freq_default=100)
-    subs['hershey'] = hershey_parser
 
     # Z calibration subcommand
     zcal_parser = subparsers.add_parser(
@@ -284,6 +269,7 @@ def _create_player(args):
             use_24h=args.use_24h,
             font=args.font,
             penlift=args.penlift,
+            curve_pts=args.curve_pts,
             **common_args_from_parsed(args)
         )
 
@@ -324,15 +310,6 @@ def _create_player(args):
             d=args.d,
             rot_freq=args.rot_freq,
             animate_d_range=args.animate_d,
-            **common_args_from_parsed(args)
-        )
-
-    elif args.command == 'hershey':
-        from .hershey_player import HersheyPlayer
-        return HersheyPlayer(
-            text=args.text,
-            font=args.font,
-            penlift=args.penlift,
             **common_args_from_parsed(args)
         )
 

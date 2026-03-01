@@ -1,11 +1,10 @@
 """Real-time oscilloscope clock display."""
 
-import numpy as np
 from datetime import datetime
 
 from .base import VectorScopePlayer
-from .hershey_player import build_xy_from_hershey
-from HersheyFonts import HersheyFonts
+from .hershey_player import is_hershey_font, build_xy_from_hershey
+from .text import build_xy_from_text
 
 
 def format_time(use_24h=False):
@@ -20,16 +19,21 @@ def format_time(use_24h=False):
 class ClockPlayer(VectorScopePlayer):
     """Real-time digital clock - updates each minute."""
 
-    def __init__(self, use_24h=False, font="futural", penlift=20, **kwargs):
+    def __init__(self, use_24h=False, font="futural", penlift=20,
+                 curve_pts=30, **kwargs):
         super().__init__(**kwargs)
         self.use_24h = use_24h
         self.penlift_samples = penlift
+        self.curve_pts = curve_pts
         self.current_time_str = None
-
-        self.hf = HersheyFonts()
-        self.hf.load_default_font(font)
-        self.hf.normalize_rendering(1.0)
         self.font_name = font
+
+        self._is_hershey = is_hershey_font(font)
+        if self._is_hershey:
+            from HersheyFonts import HersheyFonts
+            self.hf = HersheyFonts()
+            self.hf.load_default_font(font)
+            self.hf.normalize_rendering(1.0)
 
         self._update_time()
 
@@ -38,9 +42,20 @@ class ClockPlayer(VectorScopePlayer):
         time_str = format_time(self.use_24h)
         if time_str != self.current_time_str:
             self.current_time_str = time_str
-            self.xy_data, self.xy_blanking = build_xy_from_hershey(
-                self.hf, time_str, self.samples, self.amp, self.penlift_samples
-            )
+            if self._is_hershey:
+                self.xy_data, self.xy_blanking = build_xy_from_hershey(
+                    self.hf, time_str, self.samples, self.amp,
+                    self.penlift_samples
+                )
+            else:
+                self.xy_data, self.xy_blanking = build_xy_from_text(
+                    time_str,
+                    font_family=self.font_name,
+                    curve_pts=self.curve_pts,
+                    samples=self.samples,
+                    pen_lift_samples=self.penlift_samples,
+                    amp=self.amp
+                )
             self.position = 0
             print(f"  {time_str}")
 
