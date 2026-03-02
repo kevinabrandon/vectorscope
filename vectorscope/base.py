@@ -40,7 +40,9 @@ class VectorScopePlayer:
 
     def __init__(self, sample_rate=48000, freq=100, amp=0.7, device=None,
                  noise=0.0, fade_period=10.0, noise_type='white',
-                 noise_mode='sum', animate_freq_range=None, freq_sign=1):
+                 noise_mode='sum', animate_freq_range=None, freq_sign=1,
+                 channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
+                 z_gamma=1.0):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
         self.secs = 1.0 / self.freq
@@ -51,12 +53,35 @@ class VectorScopePlayer:
         self.animate_freq_range = animate_freq_range
         self.samples = int(sample_rate * self.secs)
         self.xy_data = None
+        self.xy_blanking = None
         self.position = 0
         self.global_sample = 0
         self._stream_start_time = _time.monotonic()
         self._last_status_time = 0.0
         self._last_trace_phase = 0.0
         self._frac_position = 0.0
+
+        # Z-channel (intensity modulation)
+        self.channels = channels
+        self.z_enabled = channels >= 3
+        self.z_amp = z_amp
+        self.z_delay = z_delay  # microseconds
+        self.z_blank = z_blank
+        self.z_gamma = z_gamma
+        self._z_blanking = None
+        self.z_intensity = None
+        self._z_delay_samples = round(z_delay * sample_rate / 1e6) if z_delay != 0 else 0
+        if self._z_delay_samples > 0:
+            # Positive: Z arrives late at scope → delay XY to compensate
+            self._xy_delay_buf = np.zeros((self._z_delay_samples, 2), dtype=np.float32)
+            self._z_delay_buf = np.zeros(0, dtype=np.float32)
+        elif self._z_delay_samples < 0:
+            # Negative: Z arrives early at scope → delay Z to compensate
+            self._xy_delay_buf = np.zeros((0, 2), dtype=np.float32)
+            self._z_delay_buf = np.zeros(-self._z_delay_samples, dtype=np.float32)
+        else:
+            self._xy_delay_buf = np.zeros((0, 2), dtype=np.float32)
+            self._z_delay_buf = np.zeros(0, dtype=np.float32)
 
         # Parse noise type(s): "name", "name:level", comma-separated, or "all"
         raw = noise_type or 'white'
@@ -354,6 +379,9 @@ class VectorScopePlayer:
         if not self._noise_list and self.noise <= 0:
             return
 
+        # Noise operates only on XY channels
+        xy = outdata[:, :2]
+
         t = np.arange(self.global_sample, self.global_sample + frames) / self.sample_rate
         lfo = 0.5 - 0.5 * np.cos(2 * np.pi * t / self.fade_period)
 
@@ -365,7 +393,7 @@ class VectorScopePlayer:
                 if effective <= 0:
                     continue
                 nl = self._noise_level_for(lfo, effective)
-                self._apply_one_noise(outdata, frames, t, nl, nt,
+                self._apply_one_noise(xy, frames, t, nl, nt,
                                       force_additive=True)
         elif self._noise_list and self._noise_mode == 'cycle':
             # Rotate through noise types each fade period
@@ -382,15 +410,15 @@ class VectorScopePlayer:
             effective = lvl if lvl is not None else self.noise
             if effective > 0:
                 nl = self._noise_level_for(lfo, effective)
-                self._apply_one_noise(outdata, frames, t, nl, nt)
+                self._apply_one_noise(xy, frames, t, nl, nt)
         else:
             # Single noise type
             if self.noise <= 0:
                 return
             nl = self._noise_level_for(lfo, self.noise)
-            self._apply_one_noise(outdata, frames, t, nl, self.noise_type)
+            self._apply_one_noise(xy, frames, t, nl, self.noise_type)
 
-        np.clip(outdata, -1.0, 1.0, out=outdata)
+        np.clip(xy, -1.0, 1.0, out=xy)
 
     def _apply_normal_noise(self, outdata, noise_level):
         """Displace points along the path normal for fuzzy / glowing edges.
@@ -412,6 +440,52 @@ class VectorScopePlayer:
 
         outdata[:, 0] += nx * displacement
         outdata[:, 1] += ny * displacement
+
+    # ------------------------------------------------------------------
+    # Z-channel (intensity modulation)
+    # ------------------------------------------------------------------
+
+    def _apply_z_channel(self, outdata, frames):
+        """Map intensity to Z output and fill spare channels."""
+        if not self.z_enabled:
+            return
+
+        # Default: full brightness
+        intensity = np.ones(frames, dtype=np.float32)
+
+        # Player-provided intensity (e.g. depth shading)
+        if self.z_intensity is not None:
+            intensity = self.z_intensity[:frames].copy()
+
+        # Pen-lift blanking
+        if self.z_blank and self._z_blanking is not None:
+            intensity[self._z_blanking[:frames]] = 0.0
+
+        # Delay compensation
+        if self._z_delay_samples > 0:
+            # Positive: Z arrives late at scope → delay XY so they arrive together
+            d = self._z_delay_samples
+            xy = outdata[:, :2].copy()
+            full = np.vstack([self._xy_delay_buf, xy])
+            self._xy_delay_buf = full[frames:frames + d].copy()
+            outdata[:, :2] = full[:frames]
+        elif self._z_delay_samples < 0:
+            # Negative: shift Z later (Z arrives early at scope)
+            d = -self._z_delay_samples
+            full = np.concatenate([self._z_delay_buf, intensity])
+            self._z_delay_buf = full[frames:frames + d].copy()
+            intensity = full[:frames]
+
+        # Gamma correction
+        if self.z_gamma != 1.0:
+            intensity **= self.z_gamma
+
+        # Map to output (inverted: bright = negative voltage)
+        outdata[:, 2] = (1.0 - 2.0 * intensity) * self.z_amp
+
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
 
     # ------------------------------------------------------------------
     # Trace frequency animation
@@ -450,12 +524,17 @@ class VectorScopePlayer:
 
         When animate_freq_range is set, uses variable-speed fractional
         indexing with linear interpolation for smooth speed changes.
+        Also propagates xy_blanking → _z_blanking for Z-channel use.
         """
         if self.xy_data is None:
             outdata.fill(0)
+            self._z_blanking = None
             return
 
         data_len = len(self.xy_data)
+        has_blanking = self.z_enabled and self.xy_blanking is not None
+
+        xy_out = outdata[:, :2]
 
         if self.animate_freq_range is not None:
             # Variable-speed playback via fractional position stepping
@@ -470,15 +549,32 @@ class VectorScopePlayer:
             idx0 = positions.astype(int) % data_len
             idx1 = (idx0 + 1) % data_len
             frac = (positions - np.floor(positions)).astype(np.float32)
-            outdata[:] = (self.xy_data[idx0] * (1 - frac[:, np.newaxis]) +
-                          self.xy_data[idx1] * frac[:, np.newaxis])
+            xy_out[:] = (self.xy_data[idx0] * (1 - frac[:, np.newaxis]) +
+                         self.xy_data[idx1] * frac[:, np.newaxis])
+            if has_blanking:
+                self._z_blanking = self.xy_blanking[idx0]
         else:
             out_idx = 0
+            if has_blanking:
+                blanking = np.empty(frames, dtype=bool)
+            
+            # Ensure position is in bounds (in case data_len changed)
+            self.position %= data_len
+
             while out_idx < frames:
                 chunk_size = min(frames - out_idx, data_len - self.position)
-                outdata[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
+                if chunk_size <= 0:
+                    # This should be handled by the modulo above, but for safety:
+                    self.position = 0
+                    continue
+
+                xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
+                if has_blanking:
+                    blanking[out_idx:out_idx + chunk_size] = self.xy_blanking[self.position:self.position + chunk_size]
                 self.position = (self.position + chunk_size) % data_len
                 out_idx += chunk_size
+            if has_blanking:
+                self._z_blanking = blanking
 
     def _check_status(self, status):
         """Log audio status, suppressing startup underruns and rate-limiting."""
@@ -500,6 +596,7 @@ class VectorScopePlayer:
 
         self._fill_buffer(outdata, frames)
         self._apply_noise(outdata, frames)
+        self._apply_z_channel(outdata, frames)
         self.global_sample += frames
 
     def _on_start(self):
@@ -516,7 +613,7 @@ class VectorScopePlayer:
         self._last_status_time = 0.0
         stream = sd.OutputStream(
             samplerate=self.sample_rate,
-            channels=2,
+            channels=self.channels,
             dtype='float32',
             callback=self.audio_callback,
             device=self.device,
@@ -567,6 +664,19 @@ def add_common_args(parser, freq_default=100):
                         help="How to combine multiple noise types: "
                              "sum layers them together, cycle rotates each fade period")
 
+    # Z-channel (intensity modulation)
+    parser.add_argument("--channels", type=int, default=2,
+                        help="Output channels (2=XY, 4=XY+Z+spare)")
+    parser.add_argument("--z-amp", type=float, default=1.0,
+                        help="Z output amplitude (0-1)")
+    parser.add_argument("--z-delay", type=float, default=0.0,
+                        help="Z delay compensation in microseconds (positive=Z earlier, negative=Z later)")
+    parser.add_argument("--no-z-blank", dest="z_blank", action="store_false",
+                        default=True,
+                        help="Disable pen-lift blanking on Z (blanking on by default when channels>=3)")
+    parser.add_argument("--z-gamma", type=float, default=1.0,
+                        help="Z intensity gamma correction (1.0=linear, >1=darker midtones, <1=brighter midtones)")
+
 
 def common_args_from_parsed(args):
     """Extract common arguments as a dict for passing to VectorScopePlayer."""
@@ -581,4 +691,9 @@ def common_args_from_parsed(args):
         'noise_mode': args.noise_mode,
         'animate_freq_range': args.animate_freq,
         'freq_sign': -1 if args.freq < 0 else 1,
+        'channels': args.channels,
+        'z_amp': args.z_amp,
+        'z_delay': args.z_delay,
+        'z_blank': args.z_blank,
+        'z_gamma': args.z_gamma,
     }

@@ -207,7 +207,7 @@ class PlatonicPlayer(VectorScopePlayer):
     """3D wireframe platonic solid with smooth tumbling rotation."""
 
     def __init__(self, solid='cube', rot_freq=0.15, rx=None, ry=None, rz=None,
-                 perspective=3.0, pen_lift=4, corner=6, **kwargs):
+                 perspective=3.0, pen_lift=4, **kwargs):
         super().__init__(**kwargs)
         if solid not in SOLIDS:
             raise ValueError(f"Unknown solid '{solid}'. Choose from: {', '.join(SOLID_NAMES)}")
@@ -219,17 +219,13 @@ class PlatonicPlayer(VectorScopePlayer):
         self.rz = rz if rz is not None else rot_freq * (1 + np.sqrt(5)) / 2
         self.perspective = perspective
         self.pen_lift = pen_lift
-        self.corner = corner
         self._build_path()
 
     def _build_path(self):
         """Build the base 3D path and blanking mask.
 
         Path resolution matches the audio cycle (sample_rate / freq) so
-        each path sample = one audio sample.  All edges are built with
-        sharp corners, then a uniform smoothing pass rounds every corner
-        equally — this avoids vertex misalignment between connected edges
-        and pen-lift edges while reducing DAC reconstruction filter ringing.
+        each path sample = one audio sample.
         """
         verts, edges = SOLIDS[self.solid]()
         ordered = _order_edges(edges)
@@ -265,7 +261,7 @@ class PlatonicPlayer(VectorScopePlayer):
             segments.append((ordered[-1][1], ordered[0][0], True))
 
         # Allocate samples proportional to distance so beam velocity
-        # is uniform.  This ensures smoothing affects all corners equally.
+        # is uniform.
         distances = [max(np.linalg.norm(verts[b] - verts[a]), 1e-8)
                      for a, b, _ in segments]
         total_dist = sum(distances)
@@ -288,31 +284,8 @@ class PlatonicPlayer(VectorScopePlayer):
             path_points.append(seg)
             blanking_flags.append(np.full(n, is_lift, dtype=bool))
 
-        raw = np.vstack(path_points).astype(np.float32)
-        bl = np.concatenate(blanking_flags)
-
-        # Remove consecutive duplicate positions (zero-velocity spikes
-        # at segment boundaries cause DAC reconstruction ringing)
-        diffs = np.linalg.norm(np.diff(raw, axis=0), axis=1)
-        keep = np.concatenate([[True], diffs > 1e-7])
-        if len(raw) > 1 and np.linalg.norm(raw[-1] - raw[0]) < 1e-7:
-            keep[-1] = False
-        path = raw[keep]
-        bl = bl[keep]
-
-        # Uniform smoothing: iterated 3-point moving average with
-        # wrap-around.  Smooths ALL corners equally (connected edges,
-        # pen lifts, wrap) so vertices never misalign.  Each iteration
-        # is a simple box filter; repeating approximates a Gaussian.
-        for _ in range(self.corner):
-            smoothed = np.empty_like(path)
-            smoothed[0] = (path[-1] + path[0] + path[1]) / 3
-            smoothed[-1] = (path[-2] + path[-1] + path[0]) / 3
-            smoothed[1:-1] = (path[:-2] + path[1:-1] + path[2:]) / 3
-            path = smoothed
-
-        self.base_path = path
-        self.base_blanking = bl
+        self.base_path = np.vstack(path_points).astype(np.float32)
+        self.base_blanking = np.concatenate(blanking_flags)
 
     def audio_callback(self, outdata, frames, time, status):
         self._check_status(status)
@@ -362,18 +335,19 @@ class PlatonicPlayer(VectorScopePlayer):
         outdata[:, 0] = x3 * scale * self.amp
         outdata[:, 1] = y3 * scale * self.amp
 
-        # Depth intensity (0=far, 1=near) — stored for future Z channel
-        z_range = z2.max() - z2.min()
-        if z_range > 1e-8:
-            self._depth_intensity = (z2 - z2.min()) / z_range
-        else:
-            self._depth_intensity = np.ones_like(z2)
-
-        # Blanking: data stored in self.base_blanking for future Z-channel use.
-        # With only 2 channels, pen-lift segments stay visible as faint
-        # connector lines (much cleaner than zeroing to origin).
+        # Z-channel: blanking from pen-lift segments
+        if self.z_enabled:
+            self._z_blanking = self.base_blanking[idx0]
+            # Depth intensity: near faces bright, far faces dim
+            # Lower z2 = closer to camera (larger perspective scale)
+            z_range = z2.max() - z2.min()
+            if z_range > 1e-8:
+                self.z_intensity = (0.3 + 0.7 * (z2.max() - z2) / z_range).astype(np.float32)
+            else:
+                self.z_intensity = np.ones(frames, dtype=np.float32)
 
         self._apply_noise(outdata, frames)
+        self._apply_z_channel(outdata, frames)
         self.global_sample += frames
 
     def _on_start(self):

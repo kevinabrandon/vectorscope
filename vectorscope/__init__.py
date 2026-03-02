@@ -23,11 +23,14 @@ __author__ = "Kevin"
 from .base import VectorScopePlayer, add_common_args, common_args_from_parsed
 from .circle import CirclePlayer
 from .text import TextPlayer, build_xy_from_text
+from .polyline import polylines_to_xy
 from .spiral import SpiralPlayer
 from .clock import ClockPlayer
 from .ngon import NgonPlayer
 from .fractal import FractalPlayer
 from .platonic import PlatonicPlayer
+from .sinc import SincPlayer
+from .svg import SVGPlayer
 
 __all__ = [
     # Base
@@ -42,8 +45,11 @@ __all__ = [
     "NgonPlayer",
     "FractalPlayer",
     "PlatonicPlayer",
+    "SincPlayer",
+    "SVGPlayer",
     # Utilities
     "build_xy_from_text",
+    "polylines_to_xy",
     # Meta
     "__version__",
 ]

@@ -4,6 +4,7 @@
 import argparse
 
 from .base import add_common_args, common_args_from_parsed
+from .config import load_config, save_config, apply_config_defaults, CONFIG_FILE, SAVEABLE_KEYS
 
 
 def _build_parser():
@@ -20,6 +21,9 @@ def _build_parser():
     subparsers = parser.add_subparsers(dest='command', help='Available displays')
     subs = {}
 
+    from .hershey_player import HERSHEY_FONT_NAMES
+    hershey_names = ', '.join(sorted(HERSHEY_FONT_NAMES))
+
     # Circle subcommand
     circle_parser = subparsers.add_parser(
         'circle',
@@ -32,7 +36,7 @@ def _build_parser():
                                help="Max frequency for sweep mode")
     circle_parser.add_argument("--sweep-rate", type=float, default=0.1,
                                help="Sweep rate in Hz")
-    add_common_args(circle_parser, freq_default=100)
+    add_common_args(circle_parser, freq_default=50)
     subs['circle'] = circle_parser
 
     # Text subcommand
@@ -43,15 +47,15 @@ def _build_parser():
     )
     text_parser.add_argument("text", nargs="?", default="Hello",
                              help="Text to display")
-    text_parser.add_argument("--font", default="DejaVu Sans",
-                             help="Font family")
+    text_parser.add_argument("--font", default="futural",
+                             help=f"Font name (Hershey: {hershey_names}; or any matplotlib font family)")
     text_parser.add_argument("--curve-pts", type=int, default=30,
                              help="Points per curve segment")
-    text_parser.add_argument("--penlift", type=int, default=0,
-                             help="Samples of (0,0) between contours")
+    text_parser.add_argument("--penlift", type=int, default=20,
+                             help="Blanked samples between contours (0=no pen lifts)")
     text_parser.add_argument("-o", "--out", default=None,
                              help="Output WAV file (generates file instead of streaming)")
-    add_common_args(text_parser, freq_default=100)
+    add_common_args(text_parser, freq_default=50)
     subs['text'] = text_parser
 
     # Spiral subcommand
@@ -66,7 +70,7 @@ def _build_parser():
                                help="Number of spiral turns")
     spiral_parser.add_argument("--rot-freq", type=float, default=0.5,
                                help="Rotation frequency in Hz (negative=CCW)")
-    add_common_args(spiral_parser, freq_default=100)
+    add_common_args(spiral_parser, freq_default=50)
     subs['spiral'] = spiral_parser
 
     # Clock subcommand
@@ -77,7 +81,13 @@ def _build_parser():
     )
     clock_parser.add_argument("--24h", dest="use_24h", action="store_true",
                               help="Use 24-hour format")
-    add_common_args(clock_parser, freq_default=100)
+    clock_parser.add_argument("--font", default="futural",
+                              help=f"Font name (Hershey: {hershey_names}; or any matplotlib font family)")
+    clock_parser.add_argument("--penlift", type=int, default=20,
+                              help="Blanked samples between strokes (0=no pen lifts)")
+    clock_parser.add_argument("--curve-pts", type=int, default=30,
+                              help="Points per curve segment (outline fonts only)")
+    add_common_args(clock_parser, freq_default=50)
     subs['clock'] = clock_parser
 
     # N-gon subcommand
@@ -90,7 +100,7 @@ def _build_parser():
                              help="Number of sides (3=triangle, 4=square, ...)")
     ngon_parser.add_argument("--rot-freq", type=float, default=0.0,
                              help="Rotation frequency in Hz (0=static, negative=CCW)")
-    add_common_args(ngon_parser, freq_default=100)
+    add_common_args(ngon_parser, freq_default=50)
     subs['ngon'] = ngon_parser
 
     # Fractal subcommand
@@ -104,7 +114,7 @@ def _build_parser():
                                 help="Fractal type")
     fractal_parser.add_argument("-i", "--iterations", type=int, default=None,
                                 help="Iteration depth (default varies by fractal)")
-    add_common_args(fractal_parser, freq_default=100)
+    add_common_args(fractal_parser, freq_default=50)
     subs['fractal'] = fractal_parser
 
     # Platonic solids subcommand
@@ -127,11 +137,9 @@ def _build_parser():
                                  help="Z-axis rotation speed override")
     platonic_parser.add_argument("--perspective", type=float, default=3.0,
                                  help="Camera distance (higher = flatter)")
-    platonic_parser.add_argument("--smooth", type=int, default=6,
-                                 help="Trace smoothing at vertices (0=sharp)")
     platonic_parser.add_argument("--penlift", type=int, default=4,
                                  help="Silence samples between disconnected edges")
-    add_common_args(platonic_parser, freq_default=100)
+    add_common_args(platonic_parser, freq_default=50)
     subs['platonic'] = platonic_parser
 
     # Spirograph subcommand
@@ -150,27 +158,80 @@ def _build_parser():
                                  help="Rotation frequency in Hz (0=static, negative=CCW)")
     spirograph_parser.add_argument("--animate-d", type=float, nargs=2, metavar=('D_MIN', 'D_MAX'),
                                help="Animate 'd' between D_MIN and D_MAX over fade_period")
-    add_common_args(spirograph_parser, freq_default=100)
+    add_common_args(spirograph_parser, freq_default=50)
     subs['spirograph'] = spirograph_parser
 
-    # Hershey subcommand
-    from HersheyFonts import HersheyFonts # Import here for local use
-    hf_instance = HersheyFonts() # Instantiate to get default font names
-    HERSHEY_FONT_CHOICES = list(hf_instance.default_font_names)
-
-    hershey_parser = subparsers.add_parser(
-        'hershey',
-        help='Single-stroke Hershey font text rendering',
+    # SVG subcommand
+    svg_parser = subparsers.add_parser(
+        'svg',
+        help='Display an SVG file',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    hershey_parser.add_argument("text", nargs="?", default="Hershey",
-                             help="Text to display")
-    hershey_parser.add_argument("--font", default="futural", choices=HERSHEY_FONT_CHOICES,
-                             help="Hershey font style to use")
-    hershey_parser.add_argument("--penlift", type=int, default=10,
-                             help="Samples of (0,0) between strokes")
-    add_common_args(hershey_parser, freq_default=100)
-    subs['hershey'] = hershey_parser
+    svg_parser.add_argument("filepath", help="Path to SVG file")
+    svg_parser.add_argument("--curve-pts", type=int, default=30,
+                            help="Points per curve segment")
+    svg_parser.add_argument("--penlift", type=int, default=20,
+                            help="Blanked samples between contours (0=no pen lifts)")
+    add_common_args(svg_parser, freq_default=50)
+    subs['svg'] = svg_parser
+
+    # Asteroids subcommand
+    asteroids_parser = subparsers.add_parser(
+        'asteroids',
+        help='Play Asteroids on your oscilloscope!',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    asteroids_parser.add_argument("--max-vectors", type=int, default=800,
+                                  help="Maximum line segments per frame (0 for unlimited)")
+    asteroids_parser.add_argument("--aspect", type=float, default=0.75,
+                                  help="Aspect ratio (X scale)")
+    asteroids_parser.add_argument("--penlift", type=int, default=20,
+                                  help="Blanked samples between vectors")
+    asteroids_parser.add_argument("--rocks", type=int, default=3,
+                                  help="Initial number of large asteroids")
+    asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
+                                  help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
+    asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
+                                  help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
+    add_common_args(asteroids_parser, freq_default=60)
+    subs['asteroids'] = asteroids_parser
+
+    # Sinc surface subcommand
+    sinc_parser = subparsers.add_parser(
+        'sinc',
+        help='Animated 3D sinc surface (sin(r)/r wireframe)',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    sinc_parser.add_argument("--cells", type=int, default=8,
+                             help="Grid resolution (cells per axis)")
+    sinc_parser.add_argument("--cycles", type=float, default=1.5,
+                             help="Number of ripple cycles from center to edge")
+    sinc_parser.add_argument("--speed", type=float, default=0.5,
+                             help="Wave propagation speed (0=static)")
+    sinc_parser.add_argument("--zscale", type=float, default=10,
+                             help="Height exaggeration factor")
+    sinc_parser.add_argument("--penlift", type=int, default=4,
+                             help="Blanked samples between grid lines")
+    sinc_parser.add_argument("--elevation", type=float, default=30,
+                             help="Camera elevation in degrees (0=edge-on, 90=top-down)")
+    sinc_parser.add_argument("--azimuth", type=float, default=45,
+                             help="Starting azimuth in degrees (which grid direction faces camera)")
+    sinc_parser.add_argument("--rot-freq", type=float, default=0.1,
+                             help="Azimuth rotation speed in Hz (0=static)")
+    add_common_args(sinc_parser, freq_default=50)
+    subs['sinc'] = sinc_parser
+
+    # Z calibration subcommand
+    zcal_parser = subparsers.add_parser(
+        'zcal',
+        help='Z-channel calibration patterns',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    zcal_parser.add_argument("--mode", type=str, default="delay",
+                              choices=["delay", "intensity", "blanking"],
+                              help="Calibration mode")
+    add_common_args(zcal_parser, freq_default=50)
+    subs['zcal'] = zcal_parser
 
     # Interactive subcommand
     interactive_parser = subparsers.add_parser(
@@ -182,6 +243,35 @@ def _build_parser():
                                     help="Sample rate in Hz")
     interactive_parser.add_argument("--device", type=str, default=None,
                                     help="Audio output device")
+    interactive_parser.add_argument("--channels", type=int, default=2,
+                                    help="Output channels (2=XY, 4=XY+Z+spare)")
+    subs['interactive'] = interactive_parser
+
+    # Config subcommand
+    config_parser = subparsers.add_parser(
+        'config',
+        help='View or modify persistent configuration',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    config_subs = config_parser.add_subparsers(dest='config_action')
+    config_subs.add_parser('path', help='Print config file path')
+    config_subs.add_parser('reset', help='Delete config file')
+    save_parser = config_subs.add_parser(
+        'save', help='Save values to config file',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    save_parser.add_argument("--device", type=str, default=None,
+                             help="Audio output device")
+    save_parser.add_argument("--rate", type=int, default=None,
+                             help="Sample rate in Hz")
+    save_parser.add_argument("--channels", type=int, default=None,
+                             help="Output channels")
+    save_parser.add_argument("--z-delay", type=float, default=None,
+                             help="Z delay compensation in microseconds")
+    save_parser.add_argument("--z-amp", type=float, default=None,
+                             help="Z output amplitude (0-1)")
+    save_parser.add_argument("--z-gamma", type=float, default=None,
+                             help="Z intensity gamma correction")
 
     return parser, subs
 
@@ -237,6 +327,9 @@ def _create_player(args):
         from .clock import ClockPlayer
         return ClockPlayer(
             use_24h=args.use_24h,
+            font=args.font,
+            penlift=args.penlift,
+            curve_pts=args.curve_pts,
             **common_args_from_parsed(args)
         )
 
@@ -265,7 +358,6 @@ def _create_player(args):
             ry=args.ry,
             rz=args.rz,
             perspective=args.perspective,
-            corner=args.smooth,
             pen_lift=args.penlift,
             **common_args_from_parsed(args)
         )
@@ -281,30 +373,134 @@ def _create_player(args):
             **common_args_from_parsed(args)
         )
 
-    elif args.command == 'hershey':
-        from .hershey_player import HersheyPlayer
-        return HersheyPlayer(
-            text=args.text,
-            font=args.font,
+    elif args.command == 'svg':
+        from .svg import SVGPlayer
+        return SVGPlayer(
+            filepath=args.filepath,
+            curve_pts=args.curve_pts,
+            pen_lift_samples=args.penlift,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'asteroids':
+        from .asteroids_player import AsteroidsPlayer
+        return AsteroidsPlayer(
+            max_vectors=args.max_vectors,
+            aspect_x=args.aspect,
             penlift=args.penlift,
+            dynamic_refresh=args.dynamic,
+            optimize_order=args.optimize,
+            initial_rocks=args.rocks,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'sinc':
+        from .sinc import SincPlayer
+        return SincPlayer(
+            cells=args.cells,
+            cycles=args.cycles,
+            speed=args.speed,
+            zscale=args.zscale,
+            pen_lift=args.penlift,
+            elevation=args.elevation,
+            azimuth=args.azimuth,
+            rot_freq=args.rot_freq,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'zcal':
+        if args.channels < 3:
+            print("Error: zcal requires --channels >= 3 (e.g. --channels 4)")
+            return None
+        from .zcal import ZCalPlayer
+        return ZCalPlayer(
+            mode=args.mode,
             **common_args_from_parsed(args)
         )
 
     return None
 
 
+def _handle_config(args):
+    """Handle the 'config' subcommand."""
+    import json
+    import os
+
+    if args.config_action == 'path':
+        print(CONFIG_FILE)
+    elif args.config_action == 'reset':
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+            print(f"Removed {CONFIG_FILE}")
+        else:
+            print("No config file found.")
+    elif args.config_action == 'save':
+        updates = {}
+        for key in SAVEABLE_KEYS:
+            val = getattr(args, key, None)
+            if val is not None:
+                updates[key] = val
+        if not updates:
+            print("Nothing to save. Specify at least one option, e.g. --channels 4")
+            return
+        save_config(updates)
+        print(f"Saved to {CONFIG_FILE}:")
+        for k, v in sorted(updates.items()):
+            print(f"  {k}: {v}")
+    else:
+        # No subcommand: print current config
+        cfg = load_config()
+        if not cfg:
+            if os.path.exists(CONFIG_FILE):
+                print("Config file is empty.")
+            else:
+                print("No config file found.")
+            return
+        print(f"{CONFIG_FILE}:")
+        print(json.dumps(cfg, indent=2))
+
+
 def main():
     """Main CLI entry point with subcommands."""
     parser, subparsers = _build_parser()
+
+    config = load_config()
+    apply_config_defaults(parser, config, subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
         return
 
+    if args.command == 'config':
+        _handle_config(args)
+        return
+
+    # Print loaded config values so the user can see what's active
+    if config:
+        parts = [f"{k}={v}" for k, v in sorted(config.items())]
+        print(f"config: {', '.join(parts)}")
+
     if args.command == 'interactive':
         from .interactive import InteractiveSession
         session = InteractiveSession(parser, subparsers, args)
+        session.run()
+        return
+
+    if args.command == 'zcal':
+        from .zcal import ZCalSession
+        session = ZCalSession(
+            sample_rate=args.rate,
+            freq=args.freq,
+            amp=args.amp,
+            device=args.device,
+            channels=args.channels,
+            z_amp=args.z_amp,
+            z_delay=args.z_delay,
+            z_blank=args.z_blank,
+            z_gamma=args.z_gamma,
+        )
         session.run()
         return
 
