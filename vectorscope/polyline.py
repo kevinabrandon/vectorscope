@@ -86,7 +86,7 @@ def optimize_contour_order(polys):
 
 def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
                     margin=0.9, optimize_order=True,
-                    min_points_per_segment=2):
+                    min_points_per_segment=2, normalize=True):
     """Unified polyline-to-XY pipeline.
 
     Args:
@@ -97,6 +97,7 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         margin: Scaling margin (0.9 = 10% border).
         optimize_order: If True, reorder contours to minimize beam travel.
         min_points_per_segment: Minimum points per resampled segment.
+        normalize: If True, automatically center and scale to [-1, 1].
 
     Returns:
         (xy_data, blanking) where xy_data is float32 (samples, 2)
@@ -110,27 +111,41 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
                 np.zeros(samples, dtype=bool))
 
     # Normalize
-    polys = normalize_polylines(polys, margin=margin)
+    if normalize:
+        polys = normalize_polylines(polys, margin=margin)
 
     # Optimize contour order
     if optimize_order:
         polys = optimize_contour_order(polys)
 
-    # Allocate samples across contours proportionally to arc length
+    # Allocate samples across contours.
+    # We must ensure each contour gets at least min_points_per_segment.
     pen_lift_total = pen_lift_samples * len(polys)  # between each + closing wrap
     contour_budget = samples - pen_lift_total
-
-    lengths = []
-    for p in polys:
-        d = np.diff(p, axis=0)
-        lengths.append(float(np.sqrt((d**2).sum(axis=1)).sum()))
-    total_len = sum(lengths) if lengths else 1.0
+    
+    if contour_budget < len(polys) * min_points_per_segment:
+        # If we're extremely over-budget, we just give everyone the minimum
+        # and accept that the total count will exceed 'samples'. 
+        # The final truncation at the end of the function will handle it.
+        segment_counts = [min_points_per_segment] * len(polys)
+    else:
+        # Proportional allocation of the REMAINING budget
+        lengths = []
+        for p in polys:
+            d = np.diff(p, axis=0)
+            lengths.append(float(np.sqrt((d**2).sum(axis=1)).sum()))
+        total_len = sum(lengths) if lengths else 1.0
+        
+        remaining_budget = contour_budget - (len(polys) * min_points_per_segment)
+        segment_counts = []
+        for L in lengths:
+            n = min_points_per_segment + int(remaining_budget * (L / total_len))
+            segment_counts.append(n)
 
     # Build XY sequence with pen lifts between contours
     out = []
     blanking_parts = []
-    for i, (p, L) in enumerate(zip(polys, lengths)):
-        n = int(max(min_points_per_segment, contour_budget * (L / total_len)))
+    for i, (p, n) in enumerate(zip(polys, segment_counts)):
         pts = resample_polyline(p, n)
         out.append(pts)
         blanking_parts.append(np.zeros(len(pts), dtype=bool))

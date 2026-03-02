@@ -56,7 +56,7 @@ class InteractiveSession:
 
         print("Vectorscope Interactive Mode")
         print(f"Commands: {', '.join(self._command_names)}")
-        print("Type a command to start, 'help' for info, Ctrl+C to exit.")
+        print("Type a command to start, 'help' for info, 'q' to exit.")
 
         try:
             while True:
@@ -82,7 +82,9 @@ class InteractiveSession:
         tokens = shlex.split(line)
         first = tokens[0]
 
-        if first == 'help':
+        if first in ('exit', 'quit', 'q'):
+            raise KeyboardInterrupt
+        elif first == 'help':
             self._show_help()
         elif first in self._command_names:
             self._switch_command(tokens)
@@ -117,7 +119,11 @@ class InteractiveSession:
         # the audio callback thread via GIL contention.
         self.current_player = None
 
-        player = _create_player(args)
+        try:
+            player = _create_player(args)
+        except Exception as e:
+            print(f"Error: {e}")
+            return
         if player is None:
             # e.g. text --out produces a file, not a player
             return
@@ -144,8 +150,10 @@ class InteractiveSession:
             print(f"Parse error: {e}")
             return
 
-        # Build action type lookup from the current subparser
+        # Build action type, choices, and nargs lookups from the current subparser
         action_types = self._get_action_types()
+        action_choices = self._get_action_choices()
+        action_nargs = self._get_action_nargs()
 
         changed = []
         for token in tokens:
@@ -164,11 +172,17 @@ class InteractiveSession:
 
             current_value = getattr(self.current_args, key)
             declared_type = action_types.get(key)
+            nargs = action_nargs.get(key)
             try:
                 new_value = self._coerce(current_value, value_str,
-                                         declared_type)
+                                         declared_type, nargs=nargs)
             except ValueError as e:
                 print(f"Invalid value for {key}: {e}")
+                continue
+
+            choices = action_choices.get(key)
+            if choices is not None and new_value not in choices:
+                print(f"Invalid value for {key}: choose from {', '.join(str(c) for c in choices)}")
                 continue
 
             setattr(self.current_args, key, new_value)
@@ -185,7 +199,11 @@ class InteractiveSession:
         # Silence during rebuild (see _switch_command comment)
         self.current_player = None
 
-        player = _create_player(self.current_args)
+        try:
+            player = _create_player(self.current_args)
+        except Exception as e:
+            print(f"Error: {e}")
+            return
         if player is None:
             return
         self.current_player = player
@@ -206,15 +224,47 @@ class InteractiveSession:
             if action.type is not None
         }
 
+    def _get_action_choices(self):
+        """Return {dest: choices} from the current subparser's actions."""
+        sub = self._subparsers.get(self._current_command)
+        if sub is None:
+            return {}
+        return {
+            action.dest: action.choices
+            for action in sub._actions
+            if action.choices is not None
+        }
+
+    def _get_action_nargs(self):
+        """Return {dest: nargs} for actions with nargs > 1."""
+        sub = self._subparsers.get(self._current_command)
+        if sub is None:
+            return {}
+        return {
+            action.dest: action.nargs
+            for action in sub._actions
+            if isinstance(action.nargs, int) and action.nargs > 1
+        }
+
     @staticmethod
-    def _coerce(current_value, value_str, declared_type=None):
+    def _coerce(current_value, value_str, declared_type=None, nargs=None):
         """Convert value_str to the appropriate type.
 
         Uses declared_type (from argparse action) when available,
         falling back to inference from current_value's type.
+        For nargs > 1, splits on commas and coerces each element.
         """
         if value_str.lower() == 'none':
             return None
+
+        # Multi-value params: split on commas, coerce each element
+        if isinstance(nargs, int) and nargs > 1:
+            parts = [s.strip() for s in value_str.split(',')]
+            if len(parts) != nargs:
+                raise ValueError(f"expected {nargs} comma-separated values, got {len(parts)}")
+            if declared_type is not None:
+                return [declared_type(p) for p in parts]
+            return parts
 
         # If argparse declared a type, use it directly
         if declared_type is not None:
@@ -261,8 +311,10 @@ class InteractiveSession:
         if sub is None:
             return
 
-        # Build help text lookup from the subparser's actions
+        # Build help text, choices, and nargs lookups from the subparser's actions
         help_map = {}
+        choices_map = {}
+        nargs_map = {}
         for action in sub._actions:
             if action.dest in _HIDDEN_PARAMS:
                 continue
@@ -271,6 +323,10 @@ class InteractiveSession:
                                    else type(None))):
                 continue
             help_map[action.dest] = action.help or ''
+            if action.choices is not None:
+                choices_map[action.dest] = action.choices
+            if isinstance(action.nargs, int) and action.nargs > 1:
+                nargs_map[action.dest] = action.metavar or (action.dest.upper(),) * action.nargs
 
         for dest, help_text in help_map.items():
             if not hasattr(self.current_args, dest):
@@ -278,7 +334,18 @@ class InteractiveSession:
             if only is not None and dest not in only:
                 continue
             value = getattr(self.current_args, dest)
-            print(f"  {dest:<20s}{str(value):<12s}{help_text}")
+            # Format list values as comma-separated
+            if isinstance(value, list):
+                value_str = ','.join(str(v) for v in value)
+            else:
+                value_str = str(value)
+            suffix = ''
+            if dest in choices_map:
+                suffix = f" ({', '.join(str(c) for c in choices_map[dest])})"
+            elif dest in nargs_map:
+                labels = nargs_map[dest]
+                suffix = f" (set as {dest}={','.join(labels)})"
+            print(f"  {dest:<20s}{value_str:<12s}{help_text}{suffix}")
 
     def _show_help(self):
         if self.current_args is None:

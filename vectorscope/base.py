@@ -557,8 +557,17 @@ class VectorScopePlayer:
             out_idx = 0
             if has_blanking:
                 blanking = np.empty(frames, dtype=bool)
+            
+            # Ensure position is in bounds (in case data_len changed)
+            self.position %= data_len
+
             while out_idx < frames:
                 chunk_size = min(frames - out_idx, data_len - self.position)
+                if chunk_size <= 0:
+                    # This should be handled by the modulo above, but for safety:
+                    self.position = 0
+                    continue
+
                 xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
                 if has_blanking:
                     blanking[out_idx:out_idx + chunk_size] = self.xy_blanking[self.position:self.position + chunk_size]

@@ -36,7 +36,7 @@ def _build_parser():
                                help="Max frequency for sweep mode")
     circle_parser.add_argument("--sweep-rate", type=float, default=0.1,
                                help="Sweep rate in Hz")
-    add_common_args(circle_parser, freq_default=100)
+    add_common_args(circle_parser, freq_default=50)
     subs['circle'] = circle_parser
 
     # Text subcommand
@@ -55,7 +55,7 @@ def _build_parser():
                              help="Blanked samples between contours (0=no pen lifts)")
     text_parser.add_argument("-o", "--out", default=None,
                              help="Output WAV file (generates file instead of streaming)")
-    add_common_args(text_parser, freq_default=100)
+    add_common_args(text_parser, freq_default=50)
     subs['text'] = text_parser
 
     # Spiral subcommand
@@ -70,7 +70,7 @@ def _build_parser():
                                help="Number of spiral turns")
     spiral_parser.add_argument("--rot-freq", type=float, default=0.5,
                                help="Rotation frequency in Hz (negative=CCW)")
-    add_common_args(spiral_parser, freq_default=100)
+    add_common_args(spiral_parser, freq_default=50)
     subs['spiral'] = spiral_parser
 
     # Clock subcommand
@@ -87,7 +87,7 @@ def _build_parser():
                               help="Blanked samples between strokes (0=no pen lifts)")
     clock_parser.add_argument("--curve-pts", type=int, default=30,
                               help="Points per curve segment (outline fonts only)")
-    add_common_args(clock_parser, freq_default=100)
+    add_common_args(clock_parser, freq_default=50)
     subs['clock'] = clock_parser
 
     # N-gon subcommand
@@ -100,7 +100,7 @@ def _build_parser():
                              help="Number of sides (3=triangle, 4=square, ...)")
     ngon_parser.add_argument("--rot-freq", type=float, default=0.0,
                              help="Rotation frequency in Hz (0=static, negative=CCW)")
-    add_common_args(ngon_parser, freq_default=100)
+    add_common_args(ngon_parser, freq_default=50)
     subs['ngon'] = ngon_parser
 
     # Fractal subcommand
@@ -114,7 +114,7 @@ def _build_parser():
                                 help="Fractal type")
     fractal_parser.add_argument("-i", "--iterations", type=int, default=None,
                                 help="Iteration depth (default varies by fractal)")
-    add_common_args(fractal_parser, freq_default=100)
+    add_common_args(fractal_parser, freq_default=50)
     subs['fractal'] = fractal_parser
 
     # Platonic solids subcommand
@@ -139,7 +139,7 @@ def _build_parser():
                                  help="Camera distance (higher = flatter)")
     platonic_parser.add_argument("--penlift", type=int, default=4,
                                  help="Silence samples between disconnected edges")
-    add_common_args(platonic_parser, freq_default=100)
+    add_common_args(platonic_parser, freq_default=50)
     subs['platonic'] = platonic_parser
 
     # Spirograph subcommand
@@ -158,8 +158,68 @@ def _build_parser():
                                  help="Rotation frequency in Hz (0=static, negative=CCW)")
     spirograph_parser.add_argument("--animate-d", type=float, nargs=2, metavar=('D_MIN', 'D_MAX'),
                                help="Animate 'd' between D_MIN and D_MAX over fade_period")
-    add_common_args(spirograph_parser, freq_default=100)
+    add_common_args(spirograph_parser, freq_default=50)
     subs['spirograph'] = spirograph_parser
+
+    # SVG subcommand
+    svg_parser = subparsers.add_parser(
+        'svg',
+        help='Display an SVG file',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    svg_parser.add_argument("filepath", help="Path to SVG file")
+    svg_parser.add_argument("--curve-pts", type=int, default=30,
+                            help="Points per curve segment")
+    svg_parser.add_argument("--penlift", type=int, default=20,
+                            help="Blanked samples between contours (0=no pen lifts)")
+    add_common_args(svg_parser, freq_default=50)
+    subs['svg'] = svg_parser
+
+    # Asteroids subcommand
+    asteroids_parser = subparsers.add_parser(
+        'asteroids',
+        help='Play Asteroids on your oscilloscope!',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    asteroids_parser.add_argument("--max-vectors", type=int, default=800,
+                                  help="Maximum line segments per frame (0 for unlimited)")
+    asteroids_parser.add_argument("--aspect", type=float, default=0.75,
+                                  help="Aspect ratio (X scale)")
+    asteroids_parser.add_argument("--penlift", type=int, default=20,
+                                  help="Blanked samples between vectors")
+    asteroids_parser.add_argument("--rocks", type=int, default=3,
+                                  help="Initial number of large asteroids")
+    asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
+                                  help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
+    asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
+                                  help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
+    add_common_args(asteroids_parser, freq_default=60)
+    subs['asteroids'] = asteroids_parser
+
+    # Sinc surface subcommand
+    sinc_parser = subparsers.add_parser(
+        'sinc',
+        help='Animated 3D sinc surface (sin(r)/r wireframe)',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    sinc_parser.add_argument("--cells", type=int, default=8,
+                             help="Grid resolution (cells per axis)")
+    sinc_parser.add_argument("--cycles", type=float, default=1.5,
+                             help="Number of ripple cycles from center to edge")
+    sinc_parser.add_argument("--speed", type=float, default=0.5,
+                             help="Wave propagation speed (0=static)")
+    sinc_parser.add_argument("--zscale", type=float, default=10,
+                             help="Height exaggeration factor")
+    sinc_parser.add_argument("--penlift", type=int, default=4,
+                             help="Blanked samples between grid lines")
+    sinc_parser.add_argument("--elevation", type=float, default=30,
+                             help="Camera elevation in degrees (0=edge-on, 90=top-down)")
+    sinc_parser.add_argument("--azimuth", type=float, default=45,
+                             help="Starting azimuth in degrees (which grid direction faces camera)")
+    sinc_parser.add_argument("--rot-freq", type=float, default=0.1,
+                             help="Azimuth rotation speed in Hz (0=static)")
+    add_common_args(sinc_parser, freq_default=50)
+    subs['sinc'] = sinc_parser
 
     # Z calibration subcommand
     zcal_parser = subparsers.add_parser(
@@ -170,7 +230,7 @@ def _build_parser():
     zcal_parser.add_argument("--mode", type=str, default="delay",
                               choices=["delay", "intensity", "blanking"],
                               help="Calibration mode")
-    add_common_args(zcal_parser, freq_default=100)
+    add_common_args(zcal_parser, freq_default=50)
     subs['zcal'] = zcal_parser
 
     # Interactive subcommand
@@ -310,6 +370,41 @@ def _create_player(args):
             d=args.d,
             rot_freq=args.rot_freq,
             animate_d_range=args.animate_d,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'svg':
+        from .svg import SVGPlayer
+        return SVGPlayer(
+            filepath=args.filepath,
+            curve_pts=args.curve_pts,
+            pen_lift_samples=args.penlift,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'asteroids':
+        from .asteroids_player import AsteroidsPlayer
+        return AsteroidsPlayer(
+            max_vectors=args.max_vectors,
+            aspect_x=args.aspect,
+            penlift=args.penlift,
+            dynamic_refresh=args.dynamic,
+            optimize_order=args.optimize,
+            initial_rocks=args.rocks,
+            **common_args_from_parsed(args)
+        )
+
+    elif args.command == 'sinc':
+        from .sinc import SincPlayer
+        return SincPlayer(
+            cells=args.cells,
+            cycles=args.cycles,
+            speed=args.speed,
+            zscale=args.zscale,
+            pen_lift=args.penlift,
+            elevation=args.elevation,
+            azimuth=args.azimuth,
+            rot_freq=args.rot_freq,
             **common_args_from_parsed(args)
         )
 

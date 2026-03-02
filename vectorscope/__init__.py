@@ -29,6 +29,8 @@ from .clock import ClockPlayer
 from .ngon import NgonPlayer
 from .fractal import FractalPlayer
 from .platonic import PlatonicPlayer
+from .sinc import SincPlayer
+from .svg import SVGPlayer
 
 __all__ = [
     # Base
@@ -43,6 +45,8 @@ __all__ = [
     "NgonPlayer",
     "FractalPlayer",
     "PlatonicPlayer",
+    "SincPlayer",
+    "SVGPlayer",
     # Utilities
     "build_xy_from_text",
     "polylines_to_xy",

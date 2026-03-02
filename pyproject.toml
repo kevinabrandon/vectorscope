@@ -38,6 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+svg = ["svgpathtools"]
 dev = [
     "pytest",
     "ruff",
