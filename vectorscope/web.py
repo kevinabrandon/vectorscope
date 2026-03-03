@@ -546,6 +546,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
 
   function drawTrace(floats) {
     const w = canvas.width, h = canvas.height;
+    const s = h, ox = (w - h) / 2;
     // Server sends 2 (XY) or 3 (XY+Z) floats per sample
     const stride = Math.min(channels, 3);
     const numPts = Math.floor(floats.length / stride);
@@ -560,7 +561,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const glowWidth = 6.0 + (focusScale * 25.0);
 
     // Volts/Div scaling: true to grid (10 cols X, 8 rows Y)
-    const scaleX = 0.2 / voltsX;
+    const scaleX = 0.25 / voltsX;
     const scaleY = 0.25 / voltsY;
 
     if (stride < 3) {
