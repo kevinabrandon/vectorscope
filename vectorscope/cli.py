@@ -265,6 +265,10 @@ def _build_parser():
                                     help="Enable web-based oscilloscope viewer")
     interactive_parser.add_argument("--web-port", type=int, default=8080,
                                     help="Port for web viewer")
+    interactive_parser.add_argument("--web-scale-factor", type=float, default=1.0,
+                                    help="Scale factor for the web viewer")
+    interactive_parser.add_argument("--z-amp", type=float, default=1.0,
+                                    help="Z output amplitude (0-1)")
     subs['interactive'] = interactive_parser
 
     # Config subcommand
