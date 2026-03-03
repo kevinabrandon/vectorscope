@@ -76,6 +76,20 @@ class Asteroids:
         self.maxc = float(maxc)
         self.aspect_x = float(aspect_x)
         self._rng = random.Random(seed)
+        # Store CLI overrides — these layer on top of difficulty presets
+        self._cli_overrides = {}
+        if friendly_fire:
+            self._cli_overrides['friendly_fire'] = True
+        if num_rocks != 3:
+            self._cli_overrides['rocks'] = num_rocks
+        for key, val in [('ship_bullet_speed', ship_bullet_speed),
+                         ('ship_bullet_ttl', ship_bullet_ttl),
+                         ('ship_max_bullets', ship_max_bullets),
+                         ('saucer_bullet_speed', saucer_bullet_speed),
+                         ('saucer_bullet_ttl', saucer_bullet_ttl),
+                         ('saucer_max_bullets', saucer_max_bullets)]:
+            if val is not None:
+                self._cli_overrides[key] = val
         self.friendly_fire = friendly_fire
         self.ship_bullet_speed = ship_bullet_speed
         self.ship_bullet_ttl = ship_bullet_ttl
@@ -122,8 +136,10 @@ class Asteroids:
         self._reset_ai()
 
     def start_game(self, difficulty):
-        """Start a new game with the given difficulty preset."""
-        p = self.difficulty_presets[difficulty]
+        """Start a new game with the given difficulty preset, then apply CLI overrides."""
+        p = dict(self.difficulty_presets[difficulty])
+        # CLI args override preset values
+        p.update(self._cli_overrides)
         self.initial_rocks = p['rocks']
         self.friendly_fire = p['friendly_fire']
         self.rock_speed = p['rock_speed']

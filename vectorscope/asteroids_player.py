@@ -85,7 +85,7 @@ class AsteroidsPlayer(VectorScopePlayer):
                  initial_rocks=3, friendly_fire=False,
                  ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
                  saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
-                 **kwargs):
+                 difficulty=None, **kwargs):
         # In dynamic refresh mode, we use kwargs['freq'] as the "target"
         # for a screen of average complexity.
         super().__init__(**kwargs)
@@ -115,7 +115,10 @@ class AsteroidsPlayer(VectorScopePlayer):
                               saucer_bullet_speed=saucer_bullet_speed,
                               saucer_bullet_ttl=saucer_bullet_ttl,
                               saucer_max_bullets=saucer_max_bullets)
-        self.game.attract_mode = True # Start in attract mode
+        if difficulty:
+            self.game.start_game(difficulty)
+        else:
+            self.game.attract_mode = True
         
         self.hf = HersheyFonts()
         self.hf.load_default_font("futural")
@@ -210,14 +213,46 @@ class AsteroidsPlayer(VectorScopePlayer):
     def run(self):
         """Override run to handle keyboard input."""
         import sounddevice as sd
-        
+
         self._stream_start_time = time.monotonic()
+        self._last_status_time = 0.0
+
+        # Start web server if requested
+        if self._web_port is not None:
+            from .web import VectorscopeWebServer
+            self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.start()
+            self._web_server.push_metadata({
+                'command': 'asteroids',
+                'channels': self.channels,
+            })
+
+        # Wrap callback for web push
+        _original_cb = self.audio_callback
+        web = self._web_server
+
+        def _wrapped_callback(outdata, frames, time_info, status):
+            self._z_applied = False
+            _original_cb(outdata, frames, time_info, status)
+            if self.z_enabled and not self._z_applied:
+                self._apply_z_channel(outdata, frames)
+            if web is not None:
+                xy = self._pre_delay_xy if self._pre_delay_xy is not None else outdata[:, :2]
+                if self._z_applied:
+                    z = self._pre_delay_z if self._pre_delay_z is not None else outdata[:, 2:3]
+                    import numpy as np
+                    web.push_frame(np.column_stack([xy, z]))
+                else:
+                    web.push_frame(xy.copy())
+
+        callback = _wrapped_callback
+
         if self.device == 'demo':
             stream = NullOutputStream(
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',
-                callback=self.audio_callback,
+                callback=callback,
                 blocksize=2048,
             )
         else:
@@ -225,7 +260,7 @@ class AsteroidsPlayer(VectorScopePlayer):
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',
-                callback=self.audio_callback,
+                callback=callback,
                 device=self.device,
                 latency='high',
                 blocksize=2048,
@@ -276,6 +311,8 @@ class AsteroidsPlayer(VectorScopePlayer):
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             stream.stop()
             stream.close()
+            if self._web_server:
+                self._web_server.stop()
             self._on_stop()
 
     def _handle_input(self, ch):

@@ -209,7 +209,7 @@ def _build_parser():
                                   help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
     asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
                                   help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
-    add_common_args(asteroids_parser, freq_default=60)
+    add_common_args(asteroids_parser, freq_default=60, rate_default=192000)
     subs['asteroids'] = asteroids_parser
 
     # Sinc surface subcommand
@@ -404,33 +404,10 @@ def _create_player(args):
 
     elif args.command == 'asteroids':
         from .asteroids_player import AsteroidsPlayer
-        # Difficulty presets: explicit args override preset values
-        presets = {
-            'easy':   dict(rocks=1, friendly_fire=False,
-                           saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
-                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
-            'medium': dict(rocks=3, friendly_fire=False,
-                           saucer_bullet_speed=10, saucer_bullet_ttl=90, saucer_max_bullets=2,
-                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
-            'hard':   dict(rocks=4, friendly_fire=True,
-                           saucer_bullet_speed=15, saucer_bullet_ttl=120, saucer_max_bullets=3,
-                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
-        }
-        if args.difficulty:
-            p = presets[args.difficulty]
-            # Only apply preset value if user didn't explicitly provide the arg
-            if args.rocks is None:
-                args.rocks = p['rocks']
-            if not args.friendly_fire:
-                args.friendly_fire = p['friendly_fire']
-            for key in ('saucer_bullet_speed', 'saucer_bullet_ttl', 'saucer_max_bullets',
-                        'ship_bullet_speed', 'ship_bullet_ttl', 'ship_max_bullets'):
-                if getattr(args, key) is None:
-                    setattr(args, key, p[key])
-        # Default rocks if neither difficulty nor --rocks was given
         if args.rocks is None:
             args.rocks = 3
         return AsteroidsPlayer(
+            difficulty=args.difficulty,
             max_vectors=args.max_vectors,
             aspect_x=args.aspect,
             penlift=args.penlift,

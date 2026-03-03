@@ -767,12 +767,13 @@ class VectorScopePlayer:
             self._on_stop()
 
 
-def add_common_args(parser, freq_default=100):
+def add_common_args(parser, freq_default=100, rate_default=48000):
     """Add common arguments to an argument parser.
 
     freq_default sets the default trace frequency for the command.
+    rate_default sets the default sample rate for the command.
     """
-    parser.add_argument("--rate", type=int, default=48000,
+    parser.add_argument("--rate", type=int, default=rate_default,
                         help="Sample rate in Hz")
     parser.add_argument("--freq", type=float, default=freq_default,
                         help="Trace frequency in Hz")
