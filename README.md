@@ -4,6 +4,10 @@ Draw on your oscilloscope with Python.
 
 Connect your audio L/R to scope CH1/CH2, set to XY mode, and go.
 
+No oscilloscope? No problem — use `--device demo --web` to view everything in your browser.
+
+![Web viewer demo](images/demo-screenshot.png)
+
 ```
 Left channel  → X axis
 Right channel → Y axis
@@ -40,6 +44,19 @@ pip install -e .
 
 ## Quick Start
 
+### No oscilloscope needed
+
+Try it right now in your browser — no audio hardware required:
+
+```bash
+vectorscope circle --device demo --web
+vectorscope interactive --device demo --web
+```
+
+Open http://localhost:8080 and you'll see a fully interactive oscilloscope with control knobs for intensity, focus, position, and volts/div.
+
+### With an oscilloscope
+
 ```bash
 vectorscope circle
 vectorscope ngon --sides 5 --rot-freq 0.5
@@ -53,6 +70,8 @@ vectorscope spirograph --R 5 --r 3 --rot-freq 0.2
 vectorscope zcal --channels 4
 vectorscope interactive
 ```
+
+Add `--web` to any command to also open the web viewer alongside your physical scope.
 
 Each command has `--help`:
 
@@ -74,6 +93,7 @@ vectorscope interactive
 vectorscope interactive --rate 44100
 vectorscope interactive --device "USB Audio"
 vectorscope interactive --channels 4
+vectorscope interactive --device demo --web
 ```
 
 Inside the REPL:
@@ -98,8 +118,10 @@ Type a command name (with optional arguments) to switch. Change parameters with 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rate` | 48000 | Sample rate (Hz) |
-| `--device` | - | Audio output device |
+| `--device` | - | Audio output device (`demo` for no hardware) |
 | `--channels` | 2 | Output channels (2=XY, 4=XY+Z+spare) |
+| `--web` | - | Enable web viewer |
+| `--web-port` | 8080 | Port for web viewer |
 
 ---
 
@@ -348,6 +370,31 @@ Use `zcal` to calibrate your setup.
 
 ---
 
+## Web Viewer
+
+Any command can stream to a browser-based oscilloscope viewer with `--web`. The viewer includes interactive control knobs for intensity, focus, X/Y position, and volts/div.
+
+```bash
+# With a physical oscilloscope — web viewer mirrors the display
+vectorscope platonic icosahedron --channels 4 --web
+
+# Without any audio hardware — pure browser experience
+vectorscope circle --device demo --web
+vectorscope interactive --device demo --web
+```
+
+Open http://localhost:8080 (or the port specified with `--web-port`).
+
+The `--device demo` option runs a software audio loop with no soundcard required, making it easy to try vectorscope on any machine.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--web` | - | Enable web viewer |
+| `--web-port` | 8080 | Port for web viewer |
+| `--device demo` | - | Software audio loop (no soundcard) |
+
+---
+
 ## Persistent Config
 
 Store hardware/calibration defaults in `~/.config/vectorscope/config.json` so you don't have to re-type them every time. CLI args always override config values.
@@ -397,7 +444,9 @@ All commands (except `interactive`) share these:
 | `--rate` | 48000 | Sample rate (Hz) |
 | `--freq` | varies | Trace frequency in Hz (higher = brighter, lower = sharper) |
 | `--amp` | 0.7 | Output amplitude (0-1) |
-| `--device` | - | Audio output device |
+| `--device` | - | Audio output device (`demo` for no hardware) |
+| `--web` | - | Enable web viewer |
+| `--web-port` | 8080 | Port for web viewer |
 | `--animate-freq` | - | Animate trace freq between FREQ_MIN and FREQ_MAX over fade-period |
 | `--noise` | 0 | Noise level (0-1), default for types without explicit level |
 | `--fade-period` | 10 | Fade cycle in seconds (noise and animate-freq) |
