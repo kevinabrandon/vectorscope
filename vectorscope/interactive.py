@@ -17,7 +17,7 @@ _HIDDEN_PARAMS = frozenset({
 class InteractiveSession:
     """Owns the audio stream and delegates to the current player."""
 
-    def __init__(self, parser, subparsers, args):
+    def __init__(self, parser, subparsers, args, web_port=None):
         self._parser = parser
         self._subparsers = subparsers  # dict: command name -> subparser
         self._sample_rate = args.rate
@@ -27,6 +27,8 @@ class InteractiveSession:
         self.current_player = None
         self.current_args = None
         self._current_command = None
+        self._web_port = web_port
+        self._web_server = None
 
     # ------------------------------------------------------------------
     # Audio
@@ -35,15 +37,40 @@ class InteractiveSession:
     def audio_callback(self, outdata, frames, time, status):
         player = self.current_player
         if player is not None:
+            player._z_applied = False
             player.audio_callback(outdata, frames, time, status)
+            # Auto-apply Z if the player's callback didn't
+            if player.z_enabled and not player._z_applied:
+                player._apply_z_channel(outdata, frames)
         else:
             outdata.fill(0)
+        if self._web_server is not None:
+            if player is not None:
+                pre_xy = getattr(player, '_pre_delay_xy', None)
+                xy = pre_xy if pre_xy is not None else outdata[:, :2]
+                if player._z_applied:
+                    pre_z = getattr(player, '_pre_delay_z', None)
+                    if pre_z is not None:
+                        web_data = np.column_stack([xy, pre_z])
+                    else:
+                        web_data = np.column_stack([xy, outdata[:, 2]])
+                else:
+                    web_data = xy.copy()
+            else:
+                web_data = outdata[:, :2].copy()
+            self._web_server.push_frame(web_data)
 
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def run(self):
+        # Start web server if requested
+        if self._web_port is not None:
+            from .web import VectorscopeWebServer
+            self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.start()
+
         stream = sd.OutputStream(
             samplerate=self._sample_rate,
             channels=self._channels,
@@ -72,6 +99,8 @@ class InteractiveSession:
         finally:
             stream.stop()
             stream.close()
+            if self._web_server:
+                self._web_server.stop()
             print("\nStopped.")
 
     # ------------------------------------------------------------------
@@ -132,6 +161,7 @@ class InteractiveSession:
         self.current_args = args
         self._current_command = cmd
         player._on_start()
+        self._push_web_metadata()
         print()
         self._print_params()
 
@@ -207,6 +237,7 @@ class InteractiveSession:
         if player is None:
             return
         self.current_player = player
+        self._push_web_metadata()
         self._print_params(only=set(changed))
 
     # ------------------------------------------------------------------
@@ -297,6 +328,31 @@ class InteractiveSession:
 
         # Default: string
         return value_str
+
+    # ------------------------------------------------------------------
+    # Web metadata
+    # ------------------------------------------------------------------
+
+    def _push_web_metadata(self):
+        """Send current command/params to web clients."""
+        if self._web_server is None or self.current_args is None:
+            return
+        params = {}
+        for key in vars(self.current_args):
+            if key in _HIDDEN_PARAMS:
+                continue
+            val = getattr(self.current_args, key)
+            if val is not None and not key.startswith('_'):
+                # JSON-safe: convert lists and basic types
+                if isinstance(val, (int, float, str, bool)):
+                    params[key] = val
+                elif isinstance(val, list):
+                    params[key] = val
+        self._web_server.push_metadata({
+            'command': self._current_command,
+            'channels': self._channels,
+            'params': params,
+        })
 
     # ------------------------------------------------------------------
     # Display

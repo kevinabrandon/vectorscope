@@ -20,6 +20,7 @@ class SpiralPlayer(VectorScopePlayer):
         points_per_arm = self.samples // self.arms
 
         all_points = []
+        blanking = np.zeros(points_per_arm * self.arms, dtype=bool)
         for arm in range(self.arms):
             theta = np.linspace(0, self.turns * 2 * np.pi, points_per_arm)
             r = theta / (self.turns * 2 * np.pi) * 0.95
@@ -29,9 +30,11 @@ class SpiralPlayer(VectorScopePlayer):
             y = r * np.sin(theta + arm_offset)
 
             all_points.append(np.column_stack([x, y]))
+            blanking[arm * points_per_arm] = True  # blank jump to this arm
 
         self.base_spiral = np.vstack(all_points).astype(np.float32)
         self.xy_data = self.base_spiral
+        self.xy_blanking = blanking
 
     def audio_callback(self, outdata, frames, time, status):
         """Fill from xy_data (supports animate-freq) then apply rotation."""
