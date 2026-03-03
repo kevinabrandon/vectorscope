@@ -181,19 +181,35 @@ def _build_parser():
         help='Play Asteroids on your oscilloscope!',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    asteroids_parser.add_argument("--max-vectors", type=int, default=800,
+    asteroids_parser.add_argument("--max-vectors", type=int, default=0,
                                   help="Maximum line segments per frame (0 for unlimited)")
-    asteroids_parser.add_argument("--aspect", type=float, default=0.75,
+    asteroids_parser.add_argument("--aspect", type=float, default=1.0,
                                   help="Aspect ratio (X scale)")
     asteroids_parser.add_argument("--penlift", type=int, default=20,
                                   help="Blanked samples between vectors")
-    asteroids_parser.add_argument("--rocks", type=int, default=3,
-                                  help="Initial number of large asteroids")
+    asteroids_parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default=None,
+                                  help="Game difficulty preset (overridden by explicit args)")
+    asteroids_parser.add_argument("--rocks", type=int, default=None,
+                                  help="Initial number of large asteroids (default: 3)")
+    asteroids_parser.add_argument("--friendly-fire", action="store_true", default=False,
+                                  help="Your own bullets can kill you if they loop back")
+    asteroids_parser.add_argument("--ship-bullet-speed", type=float, default=None,
+                                  help="Ship bullet speed (default: 26)")
+    asteroids_parser.add_argument("--ship-bullet-ttl", type=int, default=None,
+                                  help="Ship bullet time-to-live in frames (default: 105)")
+    asteroids_parser.add_argument("--ship-max-bullets", type=int, default=None,
+                                  help="Max simultaneous ship bullets (default: 4)")
+    asteroids_parser.add_argument("--saucer-bullet-speed", type=float, default=None,
+                                  help="Saucer bullet speed (default: 5)")
+    asteroids_parser.add_argument("--saucer-bullet-ttl", type=int, default=None,
+                                  help="Saucer bullet time-to-live in frames (default: 60 large, 90 small)")
+    asteroids_parser.add_argument("--saucer-max-bullets", type=int, default=None,
+                                  help="Max simultaneous saucer bullets (default: 1)")
     asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
                                   help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
     asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
                                   help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
-    add_common_args(asteroids_parser, freq_default=60)
+    add_common_args(asteroids_parser, freq_default=60, rate_default=192000)
     subs['asteroids'] = asteroids_parser
 
     # Sinc surface subcommand
@@ -388,13 +404,23 @@ def _create_player(args):
 
     elif args.command == 'asteroids':
         from .asteroids_player import AsteroidsPlayer
+        if args.rocks is None:
+            args.rocks = 3
         return AsteroidsPlayer(
+            difficulty=args.difficulty,
             max_vectors=args.max_vectors,
             aspect_x=args.aspect,
             penlift=args.penlift,
             dynamic_refresh=args.dynamic,
             optimize_order=args.optimize,
             initial_rocks=args.rocks,
+            friendly_fire=args.friendly_fire,
+            ship_bullet_speed=args.ship_bullet_speed,
+            ship_bullet_ttl=args.ship_bullet_ttl,
+            ship_max_bullets=args.ship_max_bullets,
+            saucer_bullet_speed=args.saucer_bullet_speed,
+            saucer_bullet_ttl=args.saucer_bullet_ttl,
+            saucer_max_bullets=args.saucer_max_bullets,
             **common_args_from_parsed(args)
         )
 

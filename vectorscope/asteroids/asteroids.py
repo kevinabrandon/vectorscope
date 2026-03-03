@@ -69,14 +69,52 @@ class VectorRenderer:
 class Asteroids:
     explodingTtl = 180
 
-    def __init__(self, maxc=2048, aspect_x=0.75, seed=None, num_rocks=3):
+    def __init__(self, maxc=2048, aspect_x=0.75, seed=None, num_rocks=3,
+                 friendly_fire=False,
+                 ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
+                 saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None):
         self.maxc = float(maxc)
         self.aspect_x = float(aspect_x)
         self._rng = random.Random(seed)
+        # Store CLI overrides — these layer on top of difficulty presets
+        self._cli_overrides = {}
+        if friendly_fire:
+            self._cli_overrides['friendly_fire'] = True
+        if num_rocks != 3:
+            self._cli_overrides['rocks'] = num_rocks
+        for key, val in [('ship_bullet_speed', ship_bullet_speed),
+                         ('ship_bullet_ttl', ship_bullet_ttl),
+                         ('ship_max_bullets', ship_max_bullets),
+                         ('saucer_bullet_speed', saucer_bullet_speed),
+                         ('saucer_bullet_ttl', saucer_bullet_ttl),
+                         ('saucer_max_bullets', saucer_max_bullets)]:
+            if val is not None:
+                self._cli_overrides[key] = val
+        self.friendly_fire = friendly_fire
+        self.ship_bullet_speed = ship_bullet_speed
+        self.ship_bullet_ttl = ship_bullet_ttl
+        self.ship_max_bullets = ship_max_bullets
+        self.saucer_bullet_speed = saucer_bullet_speed
+        self.saucer_bullet_ttl = saucer_bullet_ttl
+        self.saucer_max_bullets = saucer_max_bullets
         self.stage = Stage("Asteroids", (self.maxc, self.maxc))
         self.attract_mode = True
+        self.show_help = False
         self._time = 0.0
         self.initial_rocks = num_rocks
+        self.rock_speed = 1.0
+        self.current_difficulty = 'medium'
+        self.difficulty_presets = {
+            'easy':   dict(rocks=1, lives=5, friendly_fire=False, rock_speed=0.8,
+                           saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
+                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
+            'medium': dict(rocks=3, lives=4, friendly_fire=False, rock_speed=1.0,
+                           saucer_bullet_speed=10, saucer_bullet_ttl=90, saucer_max_bullets=2,
+                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
+            'hard':   dict(rocks=4, lives=3, friendly_fire=True, rock_speed=1.2,
+                           saucer_bullet_speed=15, saucer_bullet_ttl=120, saucer_max_bullets=3,
+                           ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
+        }
         self.reset_attract()
 
     def reset_attract(self):
@@ -89,12 +127,40 @@ class Asteroids:
         self.numRocks = self.initial_rocks
         self.nextLife = 10000
         self.saucer = None
+        self._orphaned_bullets = []
         self._saucer_spawn_timer = self._rng.uniform(4.0, 7.0)
         self.explodingCount = 0.0
         self.ship = None
-        self.createNewShip()
         self.createRocks(self.numRocks)
+        self.createNewShip()
         self._reset_ai()
+
+    def start_game(self, difficulty):
+        """Start a new game with the given difficulty preset, then apply CLI overrides."""
+        p = dict(self.difficulty_presets[difficulty])
+        # CLI args override preset values
+        p.update(self._cli_overrides)
+        self.initial_rocks = p['rocks']
+        self.friendly_fire = p['friendly_fire']
+        self.rock_speed = p['rock_speed']
+        self.ship_bullet_speed = p['ship_bullet_speed']
+        self.ship_bullet_ttl = p['ship_bullet_ttl']
+        self.ship_max_bullets = p['ship_max_bullets']
+        self.saucer_bullet_speed = p['saucer_bullet_speed']
+        self.saucer_bullet_ttl = p['saucer_bullet_ttl']
+        self.saucer_max_bullets = p['saucer_max_bullets']
+        self.current_difficulty = difficulty
+        self.attract_mode = False
+        self.show_help = False
+        self.reset_attract()
+        self.lives = p['lives']
+
+    def continue_game(self):
+        """Continue after game over, keeping score and rocks."""
+        p = self.difficulty_presets[self.current_difficulty]
+        self.lives = p['lives']
+        self.gameState = "playing"
+        self.createNewShip()
 
     def _reset_ai(self):
         self._ai_turn_timer = 0.0
@@ -102,6 +168,23 @@ class Asteroids:
         self._ai_fire_timer = 0.0
         self._ai_turn_dir = 1
         self._ai_thrusting = False
+
+    def find_safe_position(self):
+        """Find the position farthest from all rocks and saucers."""
+        threats = [r.position for r in self.rockList]
+        if self.saucer is not None:
+            threats.append(self.saucer.position)
+        if not threats:
+            return self.maxc / 2, self.maxc / 2
+        best_x, best_y, best_dist = self.maxc / 2, self.maxc / 2, 0
+        margin = self.maxc * 0.1
+        for _ in range(50):
+            x = self._rng.uniform(margin, self.maxc - margin)
+            y = self._rng.uniform(margin, self.maxc - margin)
+            min_dist = min(math.hypot(x - t.x, y - t.y) for t in threats)
+            if min_dist > best_dist:
+                best_x, best_y, best_dist = x, y, min_dist
+        return best_x, best_y
 
     def createNewShip(self):
         if self.ship:
@@ -111,17 +194,36 @@ class Asteroids:
             self.stage.removeSprite(self.ship)
             self.stage.removeSprite(self.ship.thrustJet)
         self.ship = Ship(self.stage)
+        safe_x, safe_y = self.find_safe_position()
+        self.ship.position.x = safe_x
+        self.ship.position.y = safe_y
+        self.ship.thrustJet.position.x = safe_x
+        self.ship.thrustJet.position.y = safe_y
+        if self.ship_bullet_speed is not None:
+            self.ship.bulletVelocity = self.ship_bullet_speed
+        if self.ship_bullet_ttl is not None:
+            self.ship.bulletTtl = self.ship_bullet_ttl
+        if self.ship_max_bullets is not None:
+            self.ship.maxBullets = self.ship_max_bullets
         self.stage.addSprite(self.ship.thrustJet)
         self.stage.addSprite(self.ship)
 
+    def _apply_rock_speed(self, rock):
+        rock.heading.x *= self.rock_speed
+        rock.heading.y *= self.rock_speed
+
     def createRocks(self, numRocks):
         margin = self.maxc * 0.1
+        min_ship_dist = self.maxc * 0.25
         for _ in range(0, numRocks):
-            position = Vector2d(
-                self._rng.uniform(margin, self.maxc - margin),
-                self._rng.uniform(margin, self.maxc - margin),
-            )
+            for _ in range(50):
+                x = self._rng.uniform(margin, self.maxc - margin)
+                y = self._rng.uniform(margin, self.maxc - margin)
+                if not self.ship or math.hypot(x - self.ship.position.x, y - self.ship.position.y) > min_ship_dist:
+                    break
+            position = Vector2d(x, y)
             newRock = Rock(self.stage, position, Rock.largeRockType)
+            self._apply_rock_speed(newRock)
             self.stage.addSprite(newRock)
             self.rockList.append(newRock)
 
@@ -167,6 +269,12 @@ class Asteroids:
                 rand_val = self._rng.random()
                 saucer_type = Saucer.smallSaucerType if rand_val <= 0.4 else Saucer.largeSaucerType
                 self.saucer = Saucer(self.stage, saucer_type, self.ship)
+                if self.saucer_bullet_speed is not None:
+                    self.saucer.bulletVelocity = self.saucer_bullet_speed
+                if self.saucer_bullet_ttl is not None:
+                    self.saucer.bulletTtl = [self.saucer_bullet_ttl, self.saucer_bullet_ttl]
+                if self.saucer_max_bullets is not None:
+                    self.saucer.maxBullets = self.saucer_max_bullets
                 self.stage.addSprite(self.saucer)
                 self._saucer_spawn_timer = self._rng.uniform(6.0, 12.0)
 
@@ -238,6 +346,7 @@ class Asteroids:
                     for _ in range(0, 2):
                         position = Vector2d(rock.position.x, rock.position.y)
                         newRock = Rock(self.stage, position, newRockType)
+                        self._apply_rock_speed(newRock)
                         self.stage.addSprite(newRock)
                         self.rockList.append(newRock)
 
@@ -256,8 +365,84 @@ class Asteroids:
                 self.createDebris(self.saucer)
                 self.killSaucer()
 
+        # Check orphaned saucer bullets (saucer dead, bullets still in flight)
+        for bullet in list(self._orphaned_bullets):
+            if bullet.ttl <= 0:
+                self._orphaned_bullets.remove(bullet)
+                continue
+            # Orphaned bullets can still hit rocks
+            for rock in list(self.rockList):
+                if rock.collidesWith(bullet):
+                    bullet.ttl = 0
+                    self._orphaned_bullets.remove(bullet)
+                    self.rockList.remove(rock)
+                    self.stage.removeSprite(rock)
+                    if rock.rockType == Rock.largeRockType:
+                        playSound("explode1")
+                        newRockType = Rock.mediumRockType
+                    elif rock.rockType == Rock.mediumRockType:
+                        playSound("explode2")
+                        newRockType = Rock.smallRockType
+                    else:
+                        playSound("explode3")
+                    if rock.rockType != Rock.smallRockType:
+                        for _ in range(2):
+                            position = Vector2d(rock.position.x, rock.position.y)
+                            newRock = Rock(self.stage, position, newRockType)
+                            self._apply_rock_speed(newRock)
+                            self.stage.addSprite(newRock)
+                            self.rockList.append(newRock)
+                    self.createDebris(rock)
+                    break
+            # Orphaned bullets can still hit the ship
+            if not shipHit and not self.ship.inHyperSpace:
+                if bullet in self._orphaned_bullets and self.ship.collidesWith(bullet):
+                    shipHit = True
+                    bullet.ttl = 0
+                    self._orphaned_bullets.remove(bullet)
+
+        if not shipHit and self.friendly_fire and not self.ship.inHyperSpace:
+            for bullet in self.ship.bullets:
+                if bullet.ttl > 0 and bullet.ttl < 80 and self.ship.collidesWith(bullet):
+                    shipHit = True
+                    bullet.ttl = 0
+                    break
+
         if shipHit:
             self.killShip()
+
+    def checkPostDeathCollisions(self):
+        """Check ship's in-flight bullets against rocks/saucers while ship is dead."""
+        if not self.ship:
+            return
+        for rock in list(self.rockList):
+            if self.ship.bulletCollision(rock):
+                self.rockList.remove(rock)
+                self.stage.removeSprite(rock)
+                if rock.rockType == Rock.largeRockType:
+                    playSound("explode1")
+                    newRockType = Rock.mediumRockType
+                    self.score += 50
+                elif rock.rockType == Rock.mediumRockType:
+                    playSound("explode2")
+                    newRockType = Rock.smallRockType
+                    self.score += 100
+                else:
+                    playSound("explode3")
+                    self.score += 200
+                if rock.rockType != Rock.smallRockType:
+                    for _ in range(2):
+                        position = Vector2d(rock.position.x, rock.position.y)
+                        newRock = Rock(self.stage, position, newRockType)
+                        self._apply_rock_speed(newRock)
+                        self.stage.addSprite(newRock)
+                        self.rockList.append(newRock)
+                self.createDebris(rock)
+        if self.saucer is not None:
+            if self.ship.bulletCollision(self.saucer):
+                self.score += self.saucer.scoreValue
+                self.createDebris(self.saucer)
+                self.killSaucer()
 
     def killShip(self):
         stopSound("thrust")
@@ -278,6 +463,9 @@ class Asteroids:
         stopSound("ssaucer")
         playSound("explode2")
         self.stage.removeSprite(self.saucer)
+        # Keep any in-flight bullets so they can still hit the player
+        for bullet in self.saucer.bullets:
+            self._orphaned_bullets.append(bullet)
         self.saucer = None
 
     def createDebris(self, sprite):
@@ -324,6 +512,7 @@ class Asteroids:
             if len(self.rockList) == 0:
                 self.levelUp()
         elif self.gameState == "exploding":
+            self.checkPostDeathCollisions()
             self.exploding(dt)
 
         self.render_ui(builder)
@@ -336,13 +525,22 @@ class Asteroids:
         score_str = f"{self.score:06d}"
         builder.text_at(map_x(80), int(self.maxc - 120), score_str, size=3.5, rot=0)
 
-        if self.attract_mode:
+        if self.show_help:
+            sz = 5
+            gap = int(self.maxc * 0.1)
+            lines = ["0 DEMO", "1 EASY", "2 MEDIUM", "3 HARD"]
+            top_y = int(self.maxc * 0.5 + gap * 1.5)
+            for i, line in enumerate(lines):
+                builder.text_at(map_x(self.maxc * 0.25), top_y - i * gap, line, size=sz, rot=0)
+        elif self.attract_mode:
             title = "ASTEROIDS"
             title_x = map_x(self.maxc * 0.1)
             title_y = int(self.maxc * 0.78)
             builder.text_at(title_x, title_y, title, size=8, rot=0)
 
             if int(self._time * 1.5) % 2 == 0:
-                builder.text_at(map_x(self.maxc * 0.05), int(self.maxc * 0.65), "PRESS 1 TO START", size=4.5, rot=0)
+                builder.text_at(map_x(self.maxc * 0.05), int(self.maxc * 0.65), "PRESS ? FOR HELP", size=4.5, rot=0)
         elif self.gameState == "gameover":
-            builder.text_at(map_x(self.maxc * 0.15), int(self.maxc * 0.5), "GAME OVER", size=7, rot=0)
+            builder.text_at(map_x(self.maxc * 0.15), int(self.maxc * 0.55), "GAME OVER", size=7, rot=0)
+            if int(self._time * 1.5) % 2 == 0:
+                builder.text_at(map_x(self.maxc * 0.2), int(self.maxc * 0.4), "C TO CONT", size=4.5, rot=0)

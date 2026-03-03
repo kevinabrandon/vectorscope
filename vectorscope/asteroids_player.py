@@ -80,9 +80,12 @@ class PolylineBuilder:
 
 
 class AsteroidsPlayer(VectorScopePlayer):
-    def __init__(self, max_vectors=800, aspect_x=0.75, penlift=20, 
-                 dynamic_refresh=False, optimize_order=True, 
-                 initial_rocks=3, **kwargs):
+    def __init__(self, max_vectors=800, aspect_x=0.75, penlift=20,
+                 dynamic_refresh=False, optimize_order=True,
+                 initial_rocks=3, friendly_fire=False,
+                 ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
+                 saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
+                 difficulty=None, **kwargs):
         # In dynamic refresh mode, we use kwargs['freq'] as the "target"
         # for a screen of average complexity.
         super().__init__(**kwargs)
@@ -104,8 +107,18 @@ class AsteroidsPlayer(VectorScopePlayer):
         self.target_speed = 10.0 / target_samples
         
         # Initialize the game
-        self.game = Asteroids(maxc=2048, aspect_x=aspect_x, num_rocks=initial_rocks)
-        self.game.attract_mode = True # Start in attract mode
+        self.game = Asteroids(maxc=2048, aspect_x=aspect_x, num_rocks=initial_rocks,
+                              friendly_fire=friendly_fire,
+                              ship_bullet_speed=ship_bullet_speed,
+                              ship_bullet_ttl=ship_bullet_ttl,
+                              ship_max_bullets=ship_max_bullets,
+                              saucer_bullet_speed=saucer_bullet_speed,
+                              saucer_bullet_ttl=saucer_bullet_ttl,
+                              saucer_max_bullets=saucer_max_bullets)
+        if difficulty:
+            self.game.start_game(difficulty)
+        else:
+            self.game.attract_mode = True
         
         self.hf = HersheyFonts()
         self.hf.load_default_font("futural")
@@ -194,22 +207,52 @@ class AsteroidsPlayer(VectorScopePlayer):
 
     def _on_start(self):
         print("Asteroids on Oscilloscope!")
-        print("  W, A, S, D or Arrows to move/fire")
-        print("  Space to fire, H for Hyperspace")
-        print("  1 to Start Game, 0 for Attract Mode")
-        print("  Press Ctrl+C to stop.")
+        print("  1 Easy, 2 Medium, 3 Hard")
+        print("  ? for Help, Ctrl+C to quit")
 
     def run(self):
         """Override run to handle keyboard input."""
         import sounddevice as sd
-        
+
         self._stream_start_time = time.monotonic()
+        self._last_status_time = 0.0
+
+        # Start web server if requested
+        if self._web_port is not None:
+            from .web import VectorscopeWebServer
+            self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.start()
+            self._web_server.push_metadata({
+                'command': 'asteroids',
+                'channels': self.channels,
+            })
+
+        # Wrap callback for web push
+        _original_cb = self.audio_callback
+        web = self._web_server
+
+        def _wrapped_callback(outdata, frames, time_info, status):
+            self._z_applied = False
+            _original_cb(outdata, frames, time_info, status)
+            if self.z_enabled and not self._z_applied:
+                self._apply_z_channel(outdata, frames)
+            if web is not None:
+                xy = self._pre_delay_xy if self._pre_delay_xy is not None else outdata[:, :2]
+                if self._z_applied:
+                    z = self._pre_delay_z if self._pre_delay_z is not None else outdata[:, 2:3]
+                    import numpy as np
+                    web.push_frame(np.column_stack([xy, z]))
+                else:
+                    web.push_frame(xy.copy())
+
+        callback = _wrapped_callback
+
         if self.device == 'demo':
             stream = NullOutputStream(
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',
-                callback=self.audio_callback,
+                callback=callback,
                 blocksize=2048,
             )
         else:
@@ -217,7 +260,7 @@ class AsteroidsPlayer(VectorScopePlayer):
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',
-                callback=self.audio_callback,
+                callback=callback,
                 device=self.device,
                 latency='high',
                 blocksize=2048,
@@ -245,6 +288,19 @@ class AsteroidsPlayer(VectorScopePlayer):
                         ch = sys.stdin.read(1)
                         if ch == '\x03': # Ctrl+C
                             break
+                        # Read full escape sequence before handling
+                        if ch == '\x1b':
+                            ch2 = sys.stdin.read(1)
+                            if ch2 == '[':
+                                ch3 = sys.stdin.read(1)
+                                if ch3 == 'A':    # Up
+                                    ch = 'w'
+                                elif ch3 == 'B':  # Down
+                                    ch = 's'
+                                elif ch3 == 'C':  # Right
+                                    ch = 'd'
+                                elif ch3 == 'D':  # Left
+                                    ch = 'a'
                         self._handle_input(ch)
                 else:
                     time.sleep(0.016) # ~60 FPS update rate
@@ -255,38 +311,38 @@ class AsteroidsPlayer(VectorScopePlayer):
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             stream.stop()
             stream.close()
+            if self._web_server:
+                self._web_server.stop()
             self._on_stop()
 
     def _handle_input(self, ch):
-        # Handle arrow keys (escape sequences)
-        if ch == '\x1b':
-            # Potentially an escape sequence
-            rlist, _, _ = select.select([sys.stdin], [], [], 0.001)
-            if rlist:
-                ch2 = sys.stdin.read(1)
-                if ch2 == '[':
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.001)
-                    if rlist:
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == 'A': # Up
-                            ch = 'w'
-                        elif ch3 == 'B': # Down
-                            ch = 's'
-                        elif ch3 == 'C': # Right
-                            ch = 'd'
-                        elif ch3 == 'D': # Left
-                            ch = 'a'
+        # Help toggle — works in any state
+        if ch == '?':
+            self.game.show_help = not self.game.show_help
+            return
+
+        # Difficulty start — works when not actively playing
+        if ch in ('1', '2', '3'):
+            difficulties = {'1': 'easy', '2': 'medium', '3': 'hard'}
+            self.game.start_game(difficulties[ch])
+            return
+
+        if ch in ('c', 'C') and self.game.gameState == "gameover":
+            self.game.continue_game()
+            return
+
+        if ch == '0':
+            self.game.show_help = False
+            self.game.attract_mode = True
+            self.game.reset_attract()
+            return
 
         ship = self.game.ship
-        if not ship:
-            if ch == '1':
-                self.game.attract_mode = False
-                self.game.reset_attract()
-                self.game.lives = 3
+        if not ship or self.game.gameState != "playing" or self.game.attract_mode:
             return
 
         step = 1.0 # arbitrary speed for single keypress
-        
+
         if ch in ('w', 'W'): # Up
             ship.increaseThrust(step * 5)
             ship.thrustJet.accelerating = True
@@ -299,12 +355,5 @@ class AsteroidsPlayer(VectorScopePlayer):
         elif ch == ' ':
             ship.fireBullet()
         elif ch in ('h', 'H'):
+            ship.hyperspace_exit_pos = self.game.find_safe_position()
             ship.enterHyperSpace()
-        elif ch == '1':
-            if self.game.attract_mode:
-                self.game.attract_mode = False
-                self.game.reset_attract()
-                self.game.lives = 3
-        elif ch == '0':
-            self.game.attract_mode = True
-            self.game.reset_attract()

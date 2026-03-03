@@ -120,7 +120,7 @@ class Saucer(Shooter):
     smallSaucerType = 1
 
     velocities = (1.7, 3.0)    
-    scales = (9.0, 6.0)
+    scales = (12.0, 8.0)
     scores = (500, 1000)
     pointlist = [(-9,0), (-3,-3), (-2,-6), (-2,-6), (2,-6), (3,-3), (9,0), (-9,0), (-3,4), (3,4), (9,0)]
     maxBullets = 1
@@ -141,6 +141,7 @@ class Saucer(Shooter):
             playSoundContinuous("ssaucer")
         self.laps = 0
         self.lastx = 0
+        self._fire_cooldown = 0.0
         
         # Scale the shape and create the VectorSprite
         flipped = [(x, -y) for x, y in self.pointlist]
@@ -149,13 +150,15 @@ class Saucer(Shooter):
         
     def move(self, step=1.0):
         Shooter.move(self, step)
-        
+
         if (self.position.x > self.stage.width * 0.33) and (self.position.x < self.stage.width * 0.66):
             self.heading.y = self.heading.x
         else:
             self.heading.y = 0
-        
-        self.fireBullet()
+
+        self._fire_cooldown -= step
+        if self._fire_cooldown <= 0:
+            self.fireBullet()
         
         # have we lapped?        
         if self.lastx > self.position.x:
@@ -174,6 +177,7 @@ class Saucer(Shooter):
             position = Vector2d(self.position.x, self.position.y)          
             shotFired = Shooter.fireBullet(self, heading, self.bulletTtl[self.saucerType], self.bulletVelocity)
             if shotFired:
+                self._fire_cooldown = 30.0
                 playSound("sfire")
             
 # end    

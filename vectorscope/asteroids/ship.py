@@ -47,6 +47,7 @@ class Ship(Shooter):
         self.shipDebrisList = [] 
         self.visible = True   
         self.inHyperSpace = False
+        self.hyperspace_exit_pos = None
         base_points = [(0, -10), (6, 10), (3, 7), (-3, 7), (-6, 10)]
         pointlist = [(x * SHIP_SCALE, y * SHIP_SCALE) for x, y in base_points]
         
@@ -62,10 +63,12 @@ class Ship(Shooter):
                     self.inHyperSpace = False
                     self.color = (255,255,255)
                     self.thrustJet.color = (255,255,255)
-                    self.position.x = random.uniform(0.0, float(self.stage.width))
-                    self.position.y = random.uniform(0.0, float(self.stage.height))
-                    position = Vector2d(self.position.x, self.position.y)        
-                    self.thrustJet.position = position
+                    if self.hyperspace_exit_pos:
+                        self.position.x, self.position.y = self.hyperspace_exit_pos
+                    else:
+                        self.position.x = random.uniform(0.0, float(self.stage.width))
+                        self.position.y = random.uniform(0.0, float(self.stage.height))
+                    self.thrustJet.position = Vector2d(self.position.x, self.position.y)
                     
         
         return self.transformedPointlist

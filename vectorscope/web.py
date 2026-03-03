@@ -546,9 +546,6 @@ canvas { display: block; background: #000; border-radius: 2px; }
 
   function drawTrace(floats) {
     const w = canvas.width, h = canvas.height;
-    // 1:1 signal area centered in the 10:8 canvas
-    const s = h;
-    const ox = (w - s) / 2;
     // Server sends 2 (XY) or 3 (XY+Z) floats per sample
     const stride = Math.min(channels, 3);
     const numPts = Math.floor(floats.length / stride);
@@ -557,14 +554,14 @@ canvas { display: block; background: #000; border-radius: 2px; }
     // Scale intensity: 0.0 to 1.0 (with 0.75 center)
     // Adjust level based on focus (dimmer when out of focus)
     const level = intensityScale * (1.0 - (focusScale * 0.5));
-    
+
     // Width adjustments for focus
     const coreWidth = 1.5 + (1.0 * (1.0 - focusScale)) + (focusScale * 8.0);
     const glowWidth = 6.0 + (focusScale * 25.0);
 
-    // Volts/Div scaling:
-    const scaleX = 0.5 / voltsX;
-    const scaleY = 0.5 / voltsY;
+    // Volts/Div scaling: true to grid (10 cols X, 8 rows Y)
+    const scaleX = 0.2 / voltsX;
+    const scaleY = 0.25 / voltsY;
 
     if (stride < 3) {
       // Draw glow pass (wide, dim)

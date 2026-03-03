@@ -68,6 +68,7 @@ vectorscope fractal dragon
 vectorscope platonic icosahedron
 vectorscope spirograph --R 5 --r 3 --rot-freq 0.2
 vectorscope zcal --channels 4
+vectorscope asteroids
 vectorscope interactive
 ```
 
@@ -307,6 +308,17 @@ vectorscope spirograph --animate-d 0.2 1.5 --fade-period 8
 | `--freq` | 100 | Trace frequency in Hz |
 | `--rot-freq` | 0 | Rotation frequency in Hz (0=static, negative=CCW) |
 | `--animate-d` | - | Animate d between D_MIN and D_MAX over fade period |
+
+---
+
+### asteroids
+
+Play Asteroids on your oscilloscope. Features difficulty presets, saucer AI, hyperspace, friendly fire, and more. See [ASTEROIDS.md](ASTEROIDS.md) for full details.
+
+```bash
+vectorscope asteroids                      # attract mode
+vectorscope asteroids --difficulty easy     # jump straight in
+```
 
 ---
 
