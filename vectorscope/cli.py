@@ -516,7 +516,8 @@ def main():
         from .interactive import InteractiveSession
         web_port = args.web_port if getattr(args, 'web', False) else None
         session = InteractiveSession(parser, subparsers, args,
-                                     web_port=web_port)
+                                     web_port=web_port,
+                                     web_scale_factor=args.web_scale_factor)
         session.run()
         return
 

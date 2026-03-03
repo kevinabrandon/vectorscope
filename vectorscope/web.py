@@ -65,7 +65,7 @@ class VectorscopeWebServer:
 
     def __init__(self, port=8080):
         self._port = port
-        self._frame_data = None      # latest binary frame (bytes)
+        self._frame_data = bytearray() # accumulated binary data
         self._metadata = None        # latest JSON metadata string
         self._metadata_sent = True   # tracks whether latest metadata was sent
         self._clients = []           # list of WebSocket sockets
@@ -179,6 +179,7 @@ class VectorscopeWebServer:
         print(f"[web] WS connect from {addr[0]}")
 
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        conn.settimeout(2.0) # Prevent slow clients from hanging the push loop
 
         response = (
             "HTTP/1.1 101 Switching Protocols\r\n"
@@ -194,11 +195,16 @@ class VectorscopeWebServer:
         # Block reading to detect disconnect
         try:
             while True:
-                data = conn.recv(1024)
-                if not data:
-                    break
-                if len(data) >= 2 and (data[0] & 0x0F) == 0x08:
-                    break
+                try:
+                    data = conn.recv(1024)
+                    if not data:
+                        break
+                    if len(data) >= 2 and (data[0] & 0x0F) == 0x08:
+                        break
+                except socket.timeout:
+                    # Timeout is fine, it just means the client hasn't sent 
+                    # anything (or a close frame). Keep the connection alive.
+                    continue
         except (ConnectionError, OSError):
             pass
         finally:
@@ -210,12 +216,30 @@ class VectorscopeWebServer:
     # ------------------------------------------------------------------
 
     def push_frame(self, data):
-        """Called from audio thread — store latest frame as bytes."""
-        self._frame_data = data.tobytes()
+        """Called from audio thread — accumulate frame as bytes."""
+        with self._lock:
+            # Limit buffer to ~1 second of 192kHz audio (1.5MB)
+            if len(self._frame_data) < 2000000:
+                self._frame_data.extend(data.tobytes())
 
     def push_metadata(self, meta):
         """Called when command/params change — store JSON metadata."""
+        # Include current hardware-specific settings for web normalization
+        if hasattr(self, '_z_amp'):
+            meta['z_amp'] = self._z_amp
+        if hasattr(self, '_web_scale_factor'):
+            meta['scale_factor'] = self._web_scale_factor
         self._metadata = json.dumps(meta)
+        self._metadata_sent = False
+
+    def set_z_amp(self, z_amp):
+        """Allow player to notify web server of intensity scaling."""
+        self._z_amp = z_amp
+        self._metadata_sent = False
+
+    def set_web_scale_factor(self, factor):
+        """Allow player to notify web server of scaling factor."""
+        self._web_scale_factor = factor
         self._metadata_sent = False
 
     def _add_client(self, sock):
@@ -245,11 +269,15 @@ class VectorscopeWebServer:
                 self._broadcast(frame)
                 self._metadata_sent = True
 
-            # Send latest audio frame
-            data = self._frame_data
-            if data is not None:
-                self._frame_data = None
-                frame = _ws_frame(data, opcode=0x02)
+            # Send accumulated audio data
+            data_to_send = None
+            with self._lock:
+                if self._frame_data:
+                    data_to_send = bytes(self._frame_data)
+                    self._frame_data.clear()
+
+            if data_to_send:
+                frame = _ws_frame(data_to_send, opcode=0x02)
                 self._broadcast(frame)
 
             elapsed = time.monotonic() - start
@@ -260,17 +288,24 @@ class VectorscopeWebServer:
     def _broadcast(self, frame_bytes):
         """Send to all clients, remove dead ones."""
         with self._lock:
-            dead = []
-            for sock in self._clients:
-                try:
-                    sock.sendall(frame_bytes)
-                except (BrokenPipeError, ConnectionError, OSError):
-                    dead.append(sock)
-            for sock in dead:
-                try:
-                    self._clients.remove(sock)
-                except ValueError:
-                    pass
+            clients = list(self._clients)
+        
+        dead = []
+        for sock in clients:
+            try:
+                sock.sendall(frame_bytes)
+            except (BrokenPipeError, ConnectionError, OSError, socket.timeout):
+                dead.append(sock)
+        
+        if dead:
+            with self._lock:
+                for sock in dead:
+                    if sock in self._clients:
+                        self._clients.remove(sock)
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +422,9 @@ canvas { display: block; background: #000; border-radius: 2px; }
   const statusEl = document.getElementById('bezel-status');
 
   let channels = 2;
-  let latestFloats = null;
+  let zAmp = 1.0;
+  let scaleFactor = 1.0;
+  let pendingFrames = [];
   let intensityScale = 0.75; // Initial centered value
   let focusScale = 0.0; // 0.0 is focused, higher is blurred
   let voltsX = 0.5;
@@ -561,8 +598,8 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const glowWidth = 6.0 + (focusScale * 25.0);
 
     // Volts/Div scaling: true to grid (10 cols X, 8 rows Y)
-    const scaleX = 0.25 / voltsX;
-    const scaleY = 0.25 / voltsY;
+    const scaleX = (0.25 * scaleFactor) / voltsX;
+    const scaleY = (0.25 * scaleFactor) / voltsY;
 
     if (stride < 3) {
       // Draw glow pass (wide, dim)
@@ -594,7 +631,10 @@ canvas { display: block; background: #000; border-radius: 2px; }
         const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
         const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
         const zRaw = floats[i * stride + 2];
-        const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5)) * level;
+        
+        const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
+        const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5)) * level;
+        
         if (intensity > 0.005) {
           if (!inSub) { ctx.moveTo(prevX, prevY); inSub = true; }
           ctx.lineTo(x, y);
@@ -623,7 +663,10 @@ canvas { display: block; background: #000; border-radius: 2px; }
           const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
           const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
           const zRaw = floats[i * stride + 2];
-          const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5)) * level;
+          
+          const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
+          const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5)) * level;
+          
           if (intensity > 0.005) {
             const adj = Math.min(1, intensity * intensity);
             const green = Math.round(40 + 215 * adj);
@@ -659,8 +702,8 @@ canvas { display: block; background: #000; border-radius: 2px; }
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     drawGraticule();
 
-    if (latestFloats) {
-      drawTrace(latestFloats);
+    while (pendingFrames.length > 0) {
+      drawTrace(pendingFrames.shift());
     }
 
   }
@@ -756,14 +799,17 @@ canvas { display: block; background: #000; border-radius: 2px; }
         try {
           const meta = JSON.parse(evt.data);
           if (meta.channels) { channels = meta.channels; }
+          if (meta.z_amp) { zAmp = meta.z_amp; }
+          if (meta.scale_factor) { scaleFactor = meta.scale_factor; }
         } catch(e) {}
       } else {
-        latestFloats = new Float32Array(evt.data);
+        pendingFrames.push(new Float32Array(evt.data));
+        if (pendingFrames.length > 100) { pendingFrames.shift(); }
       }
     };
 
     ws.onclose = function(evt) {
-      latestFloats = null;
+      pendingFrames = [];
       statusEl.textContent = 'disconnected — reconnecting...';
       setTimeout(connect, 2000);
     };

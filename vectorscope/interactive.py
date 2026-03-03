@@ -18,17 +18,19 @@ _HIDDEN_PARAMS = frozenset({
 class InteractiveSession:
     """Owns the audio stream and delegates to the current player."""
 
-    def __init__(self, parser, subparsers, args, web_port=None):
+    def __init__(self, parser, subparsers, args, web_port=None, web_scale_factor=1.0):
         self._parser = parser
         self._subparsers = subparsers  # dict: command name -> subparser
         self._sample_rate = args.rate
         self._device = args.device
         self._channels = args.channels
+        self._z_amp = args.z_amp
         self._command_names = sorted(self._subparsers.keys())
         self.current_player = None
         self.current_args = None
         self._current_command = None
         self._web_port = web_port
+        self._web_scale_factor = web_scale_factor
         self._web_server = None
 
     # ------------------------------------------------------------------
@@ -70,6 +72,8 @@ class InteractiveSession:
         if self._web_port is not None:
             from .web import VectorscopeWebServer
             self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.set_z_amp(self._z_amp)
+            self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
 
         if self._device == 'demo':
