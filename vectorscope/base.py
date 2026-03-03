@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import threading
 import time as _time
 
 import numpy as np
@@ -27,6 +28,62 @@ NOISE_TYPES = [
 
 # Types that 'all' cycles through (everything except 'all' itself)
 _CYCLE_TYPES = [t for t in NOISE_TYPES if t != 'all']
+
+
+class NullOutputStream:
+    """A dummy OutputStream that discards data, used for 'demo' mode."""
+    def __init__(self, samplerate, channels, dtype, callback, device=None, blocksize=0, latency=None):
+        self.samplerate = samplerate
+        self.channels = channels
+        self.callback = callback
+        self.blocksize = blocksize or 1024
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join()
+
+    def close(self):
+        self.stop()
+
+    def sleep(self, ms):
+        import time
+        time.sleep(ms / 1000.0)
+
+    def _run(self):
+        import time
+        from collections import namedtuple
+        Status = namedtuple('Status', ['output_underflow', 'output_overflow', 'input_underflow', 'input_overflow', 'priming_output'])
+        status = Status(False, False, False, False, False)
+        
+        # We'll use a simple loop to simulate real-time audio callback timing
+        # In a real system, this is driven by the DAC hardware clock.
+        frame_duration = self.blocksize / self.samplerate
+        
+        while self._running:
+            start_time = time.monotonic()
+            outdata = np.zeros((self.blocksize, self.channels), dtype=np.float32)
+            
+            # Call the user callback
+            # Note: sounddevice callback signature is (outdata, frames, time, status)
+            # where 'time' is a C-struct like object. We'll pass a dummy time.
+            StreamTime = namedtuple('StreamTime', ['currentTime', 'outputBufferDacTime'])
+            dummy_time = StreamTime(time.monotonic(), time.monotonic() + frame_duration)
+            
+            self.callback(outdata, self.blocksize, dummy_time, status)
+            
+            # Wait for the next block
+            elapsed = time.monotonic() - start_time
+            sleep_time = frame_duration - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
 
 class VectorScopePlayer:
@@ -677,19 +734,30 @@ class VectorScopePlayer:
 
         callback = _wrapped_callback
 
-        stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype='float32',
-            callback=callback,
-            device=self.device,
-            latency='high',
-        )
+        if self.device == 'demo':
+            stream = NullOutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=callback,
+            )
+        else:
+            stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=callback,
+                device=self.device,
+                latency='high',
+            )
         stream.start()
         self._on_start()
         try:
             while True:
-                sd.sleep(1000)
+                if self.device == 'demo':
+                    stream.sleep(1000)
+                else:
+                    sd.sleep(1000)
         except KeyboardInterrupt:
             pass
         finally:

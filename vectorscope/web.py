@@ -332,48 +332,48 @@ canvas { display: block; background: #000; border-radius: 2px; }
     <div id="controls">
       <div class="ctrl-section">
         <div class="ctrl-title" data-grid="0">DISPLAY</div>
-        <div class="dial-group" data-grid="2">
+        <div class="dial-group" data-grid="2" data-param="intensity">
           <div class="dial-label">INTENSITY</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
         </div>
-        <div class="dial-group" data-grid="6">
+        <div class="dial-group" data-grid="6" data-param="focus">
           <div class="dial-label">FOCUS</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
         </div>
       </div>
       <div class="ctrl-section">
         <div class="ctrl-title" data-grid="0">CH1 &mdash; X</div>
-        <div class="dial-group" data-grid="2">
+        <div class="dial-group" data-grid="2" data-param="pos_x">
           <div class="dial-label">POSITION</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
         </div>
-        <div class="dial-group" data-grid="5">
+        <div class="dial-group" data-grid="5" data-param="volts_x">
           <div class="dial-label">VOLTS/DIV</div>
           <div class="dial dial-lg">
             <div class="dial-pointer"></div>
-            <span class="dial-tick" data-angle="-135">.1</span>
-            <span class="dial-tick" data-angle="-67.5">.2</span>
+            <span class="dial-tick" data-angle="-135">2</span>
+            <span class="dial-tick" data-angle="-67.5">1</span>
             <span class="dial-tick" data-angle="0">.5</span>
-            <span class="dial-tick" data-angle="67.5">1</span>
-            <span class="dial-tick" data-angle="135">2</span>
+            <span class="dial-tick" data-angle="67.5">.2</span>
+            <span class="dial-tick" data-angle="135">.1</span>
           </div>
         </div>
       </div>
       <div class="ctrl-section">
         <div class="ctrl-title" data-grid="0">CH2 &mdash; Y</div>
-        <div class="dial-group" data-grid="2">
+        <div class="dial-group" data-grid="2" data-param="pos_y">
           <div class="dial-label">POSITION</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
         </div>
-        <div class="dial-group" data-grid="5">
+        <div class="dial-group" data-grid="5" data-param="volts_y">
           <div class="dial-label">VOLTS/DIV</div>
           <div class="dial dial-lg">
             <div class="dial-pointer"></div>
-            <span class="dial-tick" data-angle="-135">.1</span>
-            <span class="dial-tick" data-angle="-67.5">.2</span>
+            <span class="dial-tick" data-angle="-135">2</span>
+            <span class="dial-tick" data-angle="-67.5">1</span>
             <span class="dial-tick" data-angle="0">.5</span>
-            <span class="dial-tick" data-angle="67.5">1</span>
-            <span class="dial-tick" data-angle="135">2</span>
+            <span class="dial-tick" data-angle="67.5">.2</span>
+            <span class="dial-tick" data-angle="135">.1</span>
           </div>
         </div>
       </div>
@@ -388,6 +388,12 @@ canvas { display: block; background: #000; border-radius: 2px; }
 
   let channels = 2;
   let latestFloats = null;
+  let intensityScale = 0.75; // Initial centered value
+  let focusScale = 0.0; // 0.0 is focused, higher is blurred
+  let voltsX = 0.5;
+  let voltsY = 0.5;
+  let posX = 0.0;
+  let posY = 0.0;
 
   const bezel = document.getElementById('bezel');
   const controlsEl = document.getElementById('controls');
@@ -409,6 +415,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
     container.style.padding = `${pad}px`;
     const scopeBody = document.getElementById('scope-body');
     scopeBody.style.padding = `${pad}px`;
+    scopeBody.style.overflow = 'visible';
     bezel.style.padding = `${pad}px`;
 
     // Internal spacing between sections
@@ -502,9 +509,39 @@ canvas { display: block; background: #000; border-radius: 2px; }
       const y = (i / rows) * h;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
     }
+    
+    // Draw Center Axes with Ticks
     ctx.strokeStyle = '#111';
-    ctx.beginPath(); ctx.moveTo(w/2, 0); ctx.lineTo(w/2, h); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+    ctx.lineWidth = 1.5;
+    const cx = w / 2;
+    const cy = h / 2;
+    
+    // Horizontal center line
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
+    // Vertical center line
+    ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
+    
+    // Ticks on horizontal center line (vertical marks)
+    const tickH = h / 100;
+    for (let i = 0; i <= cols * 5; i++) {
+      if (i % 5 === 0) continue; // Skip major grid lines
+      const x = (i / (cols * 5)) * w;
+      ctx.beginPath();
+      ctx.moveTo(x, cy - tickH);
+      ctx.lineTo(x, cy + tickH);
+      ctx.stroke();
+    }
+    
+    // Ticks on vertical center line (horizontal marks)
+    const tickW = w / 125;
+    for (let i = 0; i <= rows * 5; i++) {
+      if (i % 5 === 0) continue; // Skip major grid lines
+      const y = (i / (rows * 5)) * h;
+      ctx.beginPath();
+      ctx.moveTo(cx - tickW, y);
+      ctx.lineTo(cx + tickW, y);
+      ctx.stroke();
+    }
   }
 
   function drawTrace(floats) {
@@ -517,35 +554,49 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const numPts = Math.floor(floats.length / stride);
     if (numPts < 2) return;
 
+    // Scale intensity: 0.0 to 1.0 (with 0.75 center)
+    // Adjust level based on focus (dimmer when out of focus)
+    const level = intensityScale * (1.0 - (focusScale * 0.5));
+    
+    // Width adjustments for focus
+    const coreWidth = 1.5 + (1.0 * (1.0 - focusScale)) + (focusScale * 8.0);
+    const glowWidth = 6.0 + (focusScale * 25.0);
+
+    // Volts/Div scaling:
+    const scaleX = 0.5 / voltsX;
+    const scaleY = 0.5 / voltsY;
+
     if (stride < 3) {
       // Draw glow pass (wide, dim)
-      ctx.strokeStyle = 'rgba(0, 255, 65, 0.12)';
-      ctx.lineWidth = 8;
+      ctx.strokeStyle = `rgba(0, 255, 65, ${0.12 * level})`;
+      ctx.lineWidth = glowWidth;
       ctx.beginPath();
       for (let i = 0; i < numPts; i++) {
-        const x = (floats[i * stride] + 1) * 0.5 * s + ox;
-        const y = (1 - (floats[i * stride + 1] + 1) * 0.5) * s;
+        const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
+        const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
       // Draw bright core
       ctx.strokeStyle = '#00ff41';
-      ctx.lineWidth = 2.5;
+      ctx.globalAlpha = Math.min(1, level);
+      ctx.lineWidth = coreWidth;
       ctx.stroke();
+      ctx.globalAlpha = 1.0;
     } else {
       // Z-channel: batch visible segments into subpaths, skip blanked
-      let prevX = (floats[0] + 1) * 0.5 * s + ox;
-      let prevY = (1 - (floats[1] + 1) * 0.5) * s;
+      let prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
+      let prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
       let hasPartial = false;
 
       ctx.beginPath();
       let inSub = false;
       for (let i = 1; i < numPts; i++) {
-        const x = (floats[i * stride] + 1) * 0.5 * s + ox;
-        const y = (1 - (floats[i * stride + 1] + 1) * 0.5) * s;
+        const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
+        const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
         const zRaw = floats[i * stride + 2];
-        const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5));
+        const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5)) * level;
         if (intensity > 0.005) {
           if (!inSub) { ctx.moveTo(prevX, prevY); inSub = true; }
           ctx.lineTo(x, y);
@@ -557,29 +608,33 @@ canvas { display: block; background: #000; border-radius: 2px; }
         prevY = y;
       }
       // Glow pass (always batched)
-      ctx.strokeStyle = 'rgba(0, 255, 65, 0.12)';
-      ctx.lineWidth = 8;
+      ctx.strokeStyle = `rgba(0, 255, 65, ${0.12 * level})`;
+      ctx.lineWidth = glowWidth;
       ctx.stroke();
 
-      if (!hasPartial) {
+      if (!hasPartial && level >= 0.99) {
         // All visible at full intensity — batched core (fast path)
         ctx.strokeStyle = '#00ff41';
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = coreWidth;
         ctx.stroke();
       } else {
         // Variable intensity — per-segment core over batched glow
-        prevX = (floats[0] + 1) * 0.5 * s + ox;
-        prevY = (1 - (floats[1] + 1) * 0.5) * s;
+        prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
+        prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
         for (let i = 1; i < numPts; i++) {
-          const x = (floats[i * stride] + 1) * 0.5 * s + ox;
-          const y = (1 - (floats[i * stride + 1] + 1) * 0.5) * s;
+          const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
+          const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
           const zRaw = floats[i * stride + 2];
-          const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5));
+          const intensity = Math.max(0, Math.min(1, (1 - zRaw) * 0.5)) * level;
           if (intensity > 0.005) {
-            const adj = intensity * intensity;
+            const adj = Math.min(1, intensity * intensity);
             const green = Math.round(40 + 215 * adj);
-            const alpha = 0.03 + 0.97 * adj;
-            ctx.lineWidth = 1.5 + 1.5 * adj;
+            const alpha = Math.min(1, 0.03 + 0.97 * adj);
+            
+            // Scaled core width based on per-segment intensity and global focus
+            const segCoreWidth = (1.0 + (1.0 * adj)) * (coreWidth / 2.0);
+            
+            ctx.lineWidth = segCoreWidth;
             ctx.strokeStyle = `rgba(0, ${green}, 40, ${alpha})`;
             ctx.beginPath();
             ctx.moveTo(prevX, prevY);
@@ -629,6 +684,30 @@ canvas { display: block; background: #000; border-radius: 2px; }
       angle = Math.round((angle + 135) / step) * step - 135;
     }
     activePointer.style.transform = `rotate(${angle}deg)`;
+
+    // Handle parameter changes
+    const group = activeDial.closest('.dial-group');
+    if (group && group.dataset.param === 'intensity') {
+      // Map [-135, 135] to [0.0, 1.0] where center (0) is 0.75
+      if (angle <= 0) {
+        intensityScale = (angle + 135) / 135 * 0.75;
+      } else {
+        intensityScale = 0.75 + (angle / 135 * 0.25);
+      }
+    } else if (group && group.dataset.param === 'focus') {
+      focusScale = Math.abs(angle) / 135;
+    } else if (group && (group.dataset.param === 'volts_x' || group.dataset.param === 'volts_y')) {
+      const values = [2.0, 1.0, 0.5, 0.2, 0.1];
+      const step = 270 / 4;
+      const idx = Math.round((angle + 135) / step);
+      const val = values[Math.max(0, Math.min(values.length - 1, idx))];
+      if (group.dataset.param === 'volts_x') voltsX = val;
+      else voltsY = val;
+    } else if (group && (group.dataset.param === 'pos_x' || group.dataset.param === 'pos_y')) {
+      const val = angle / 135;
+      if (group.dataset.param === 'pos_x') posX = val;
+      else posY = val;
+    }
   }
 
   document.querySelectorAll('.dial').forEach(dial => {

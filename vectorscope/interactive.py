@@ -6,6 +6,7 @@ import numpy as np
 import sounddevice as sd
 
 from .cli import _create_player
+from .base import NullOutputStream
 
 # Params that are stream-level or internal — not changeable mid-session.
 _HIDDEN_PARAMS = frozenset({
@@ -71,14 +72,22 @@ class InteractiveSession:
             self._web_server = VectorscopeWebServer(self._web_port)
             self._web_server.start()
 
-        stream = sd.OutputStream(
-            samplerate=self._sample_rate,
-            channels=self._channels,
-            dtype='float32',
-            callback=self.audio_callback,
-            device=self._device,
-            latency='high',
-        )
+        if self._device == 'demo':
+            stream = NullOutputStream(
+                samplerate=self._sample_rate,
+                channels=self._channels,
+                dtype='float32',
+                callback=self.audio_callback,
+            )
+        else:
+            stream = sd.OutputStream(
+                samplerate=self._sample_rate,
+                channels=self._channels,
+                dtype='float32',
+                callback=self.audio_callback,
+                device=self._device,
+                latency='high',
+            )
         stream.start()
 
         print("Vectorscope Interactive Mode")
