@@ -226,6 +226,12 @@ class FractalPlayer(VectorScopePlayer):
 
         self.xy_data = np.clip(xy * self.amp, -1.0, 1.0).astype(np.float32)
 
+        # Blank the wraparound for open curves (first != last point)
+        dist = np.linalg.norm(points[-1] - points[0])
+        if dist > 1e-6:
+            self.xy_blanking = np.zeros(self.samples, dtype=bool)
+            self.xy_blanking[0] = True
+
     def _on_start(self):
         print(f"📐 {self.fractal_type.title()} fractal (iterations={self.iterations})")
         print("  Press Ctrl+C to stop.")

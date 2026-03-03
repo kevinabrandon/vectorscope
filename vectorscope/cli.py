@@ -245,6 +245,10 @@ def _build_parser():
                                     help="Audio output device")
     interactive_parser.add_argument("--channels", type=int, default=2,
                                     help="Output channels (2=XY, 4=XY+Z+spare)")
+    interactive_parser.add_argument("--web", action="store_true", default=False,
+                                    help="Enable web-based oscilloscope viewer")
+    interactive_parser.add_argument("--web-port", type=int, default=8080,
+                                    help="Port for web viewer")
     subs['interactive'] = interactive_parser
 
     # Config subcommand
@@ -484,7 +488,9 @@ def main():
 
     if args.command == 'interactive':
         from .interactive import InteractiveSession
-        session = InteractiveSession(parser, subparsers, args)
+        web_port = args.web_port if getattr(args, 'web', False) else None
+        session = InteractiveSession(parser, subparsers, args,
+                                     web_port=web_port)
         session.run()
         return
 
@@ -506,6 +512,7 @@ def main():
 
     player = _create_player(args)
     if player:
+        player._command_name = args.command
         player.run()
 
 

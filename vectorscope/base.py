@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import threading
 import time as _time
 
 import numpy as np
@@ -29,6 +30,61 @@ NOISE_TYPES = [
 _CYCLE_TYPES = [t for t in NOISE_TYPES if t != 'all']
 
 
+class NullOutputStream:
+    """A dummy OutputStream that discards data, used for 'demo' mode."""
+    def __init__(self, samplerate, channels, dtype, callback, device=None, blocksize=0, latency=None):
+        self.samplerate = samplerate
+        self.channels = channels
+        self.callback = callback
+        self.blocksize = blocksize or 1024
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join()
+
+    def close(self):
+        self.stop()
+
+    def sleep(self, ms):
+        import time
+        time.sleep(ms / 1000.0)
+
+    class _NullStatus:
+        """Mimics sounddevice CallbackFlags — falsy when no errors."""
+        output_underflow = False
+        output_overflow = False
+        input_underflow = False
+        input_overflow = False
+        priming_output = False
+        def __bool__(self):
+            return False
+
+    def _run(self):
+        import time
+        from collections import namedtuple
+        status = self._NullStatus()
+        StreamTime = namedtuple('StreamTime', ['currentTime', 'outputBufferDacTime'])
+        frame_duration = self.blocksize / self.samplerate
+
+        while self._running:
+            start_time = time.monotonic()
+            outdata = np.zeros((self.blocksize, self.channels), dtype=np.float32)
+            dummy_time = StreamTime(time.monotonic(), time.monotonic() + frame_duration)
+            self.callback(outdata, self.blocksize, dummy_time, status)
+            elapsed = time.monotonic() - start_time
+            sleep_time = frame_duration - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+
 class VectorScopePlayer:
     """
     Base class for real-time XY oscilloscope audio streaming.
@@ -42,7 +98,7 @@ class VectorScopePlayer:
                  noise=0.0, fade_period=10.0, noise_type='white',
                  noise_mode='sum', animate_freq_range=None, freq_sign=1,
                  channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
-                 z_gamma=1.0):
+                 z_gamma=1.0, web_port=None):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
         self.secs = 1.0 / self.freq
@@ -60,6 +116,9 @@ class VectorScopePlayer:
         self._last_status_time = 0.0
         self._last_trace_phase = 0.0
         self._frac_position = 0.0
+        self._web_port = web_port
+        self._web_server = None
+        self._command_name = None
 
         # Z-channel (intensity modulation)
         self.channels = channels
@@ -82,6 +141,9 @@ class VectorScopePlayer:
         else:
             self._xy_delay_buf = np.zeros((0, 2), dtype=np.float32)
             self._z_delay_buf = np.zeros(0, dtype=np.float32)
+        self._pre_delay_xy = None
+        self._pre_delay_z = None
+        self._z_applied = False
 
         # Parse noise type(s): "name", "name:level", comma-separated, or "all"
         raw = noise_type or 'white'
@@ -448,7 +510,10 @@ class VectorScopePlayer:
     def _apply_z_channel(self, outdata, frames):
         """Map intensity to Z output and fill spare channels."""
         if not self.z_enabled:
+            self._pre_delay_xy = None
             return
+
+        self._z_applied = True
 
         # Default: full brightness
         intensity = np.ones(frames, dtype=np.float32)
@@ -461,7 +526,15 @@ class VectorScopePlayer:
         if self.z_blank and self._z_blanking is not None:
             intensity[self._z_blanking[:frames]] = 0.0
 
-        # Delay compensation
+        # Capture pre-delay state for web viewers (no soundcard delay needed)
+        if self._z_delay_samples != 0:
+            self._pre_delay_xy = outdata[:, :2].copy()
+            pre_delay_intensity = intensity.copy()
+        else:
+            self._pre_delay_xy = None
+            pre_delay_intensity = None
+
+        # Delay compensation (soundcard only)
         if self._z_delay_samples > 0:
             # Positive: Z arrives late at scope → delay XY so they arrive together
             d = self._z_delay_samples
@@ -482,6 +555,14 @@ class VectorScopePlayer:
 
         # Map to output (inverted: bright = negative voltage)
         outdata[:, 2] = (1.0 - 2.0 * intensity) * self.z_amp
+
+        # Compute web Z from pre-delay intensity (with gamma, without delay)
+        if pre_delay_intensity is not None:
+            if self.z_gamma != 1.0:
+                pre_delay_intensity **= self.z_gamma
+            self._pre_delay_z = (1.0 - 2.0 * pre_delay_intensity) * self.z_amp
+        else:
+            self._pre_delay_z = None
 
         # Zero spare channel
         if self.channels >= 4:
@@ -611,24 +692,78 @@ class VectorScopePlayer:
         """Start the audio stream."""
         self._stream_start_time = _time.monotonic()
         self._last_status_time = 0.0
-        stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype='float32',
-            callback=self.audio_callback,
-            device=self.device,
-            latency='high',
-        )
+
+        # Start web server if requested
+        if self._web_port is not None:
+            from .web import VectorscopeWebServer
+            self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.start()
+            # Send initial metadata
+            self._web_server.push_metadata({
+                'command': self._command_name or type(self).__name__,
+                'channels': self.channels,
+            })
+
+        # Wrap callback to ensure Z-channel is always applied and
+        # push frames to web server
+        _original_cb = self.audio_callback
+        web = self._web_server
+
+        def _wrapped_callback(outdata, frames, time, status):
+            self._z_applied = False
+            _original_cb(outdata, frames, time, status)
+            # Auto-apply Z if the player's callback didn't
+            if self.z_enabled and not self._z_applied:
+                self._apply_z_channel(outdata, frames)
+            if web is not None:
+                # Use pre-delay XY if available, otherwise raw XY
+                if self._pre_delay_xy is not None:
+                    xy = self._pre_delay_xy
+                else:
+                    xy = outdata[:, :2]
+                # Include Z if z_channel was applied
+                if self._z_applied:
+                    if self._pre_delay_z is not None:
+                        web_data = np.column_stack([xy, self._pre_delay_z])
+                    else:
+                        web_data = np.column_stack([xy, outdata[:, 2]])
+                else:
+                    web_data = xy.copy()
+                web.push_frame(web_data)
+
+        callback = _wrapped_callback
+
+        if self.device == 'demo':
+            stream = NullOutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=callback,
+            )
+        else:
+            stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=callback,
+                device=self.device,
+                latency='high',
+            )
         stream.start()
         self._on_start()
         try:
             while True:
-                sd.sleep(1000)
+                if self.device == 'demo':
+                    stream.sleep(1000)
+                else:
+                    sd.sleep(1000)
         except KeyboardInterrupt:
             pass
         finally:
             stream.stop()
             stream.close()
+            if self._web_server:
+                self._web_server.stop()
             self._on_stop()
 
 
@@ -677,6 +812,12 @@ def add_common_args(parser, freq_default=100):
     parser.add_argument("--z-gamma", type=float, default=1.0,
                         help="Z intensity gamma correction (1.0=linear, >1=darker midtones, <1=brighter midtones)")
 
+    # Web viewer
+    parser.add_argument("--web", action="store_true", default=False,
+                        help="Enable web-based oscilloscope viewer")
+    parser.add_argument("--web-port", type=int, default=8080,
+                        help="Port for web viewer")
+
 
 def common_args_from_parsed(args):
     """Extract common arguments as a dict for passing to VectorScopePlayer."""
@@ -696,4 +837,5 @@ def common_args_from_parsed(args):
         'z_delay': args.z_delay,
         'z_blank': args.z_blank,
         'z_gamma': args.z_gamma,
+        'web_port': args.web_port if getattr(args, 'web', False) else None,
     }

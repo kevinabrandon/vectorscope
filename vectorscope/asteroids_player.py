@@ -9,7 +9,7 @@ import threading
 import numpy as np
 from HersheyFonts import HersheyFonts
 
-from .base import VectorScopePlayer
+from .base import VectorScopePlayer, NullOutputStream
 from .polyline import polylines_to_xy
 from .asteroids.asteroids import Asteroids
 
@@ -204,15 +204,24 @@ class AsteroidsPlayer(VectorScopePlayer):
         import sounddevice as sd
         
         self._stream_start_time = time.monotonic()
-        stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype='float32',
-            callback=self.audio_callback,
-            device=self.device,
-            latency='high',
-            blocksize=2048,
-        )
+        if self.device == 'demo':
+            stream = NullOutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=self.audio_callback,
+                blocksize=2048,
+            )
+        else:
+            stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                callback=self.audio_callback,
+                device=self.device,
+                latency='high',
+                blocksize=2048,
+            )
         stream.start()
         self._on_start()
         
