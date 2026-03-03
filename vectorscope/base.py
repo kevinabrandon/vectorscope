@@ -57,29 +57,28 @@ class NullOutputStream:
         import time
         time.sleep(ms / 1000.0)
 
+    class _NullStatus:
+        """Mimics sounddevice CallbackFlags — falsy when no errors."""
+        output_underflow = False
+        output_overflow = False
+        input_underflow = False
+        input_overflow = False
+        priming_output = False
+        def __bool__(self):
+            return False
+
     def _run(self):
         import time
         from collections import namedtuple
-        Status = namedtuple('Status', ['output_underflow', 'output_overflow', 'input_underflow', 'input_overflow', 'priming_output'])
-        status = Status(False, False, False, False, False)
-        
-        # We'll use a simple loop to simulate real-time audio callback timing
-        # In a real system, this is driven by the DAC hardware clock.
+        status = self._NullStatus()
+        StreamTime = namedtuple('StreamTime', ['currentTime', 'outputBufferDacTime'])
         frame_duration = self.blocksize / self.samplerate
-        
+
         while self._running:
             start_time = time.monotonic()
             outdata = np.zeros((self.blocksize, self.channels), dtype=np.float32)
-            
-            # Call the user callback
-            # Note: sounddevice callback signature is (outdata, frames, time, status)
-            # where 'time' is a C-struct like object. We'll pass a dummy time.
-            StreamTime = namedtuple('StreamTime', ['currentTime', 'outputBufferDacTime'])
             dummy_time = StreamTime(time.monotonic(), time.monotonic() + frame_duration)
-            
             self.callback(outdata, self.blocksize, dummy_time, status)
-            
-            # Wait for the next block
             elapsed = time.monotonic() - start_time
             sleep_time = frame_duration - elapsed
             if sleep_time > 0:
