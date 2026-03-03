@@ -221,6 +221,8 @@ class AsteroidsPlayer(VectorScopePlayer):
         if self._web_port is not None:
             from .web import VectorscopeWebServer
             self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.set_z_amp(self.z_amp)
+            self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
             self._web_server.push_metadata({
                 'command': 'asteroids',
@@ -237,13 +239,15 @@ class AsteroidsPlayer(VectorScopePlayer):
             if self.z_enabled and not self._z_applied:
                 self._apply_z_channel(outdata, frames)
             if web is not None:
-                xy = self._pre_delay_xy if self._pre_delay_xy is not None else outdata[:, :2]
+                # Always use pre-delay data for the web if available, 
+                # as the web player doesn't need hardware delay compensation.
+                xy = self._pre_delay_xy if self._pre_delay_xy is not None else outdata[:, :2].copy()
                 if self._z_applied:
-                    z = self._pre_delay_z if self._pre_delay_z is not None else outdata[:, 2:3]
+                    z = self._pre_delay_z if self._pre_delay_z is not None else outdata[:, 2:3].copy()
                     import numpy as np
                     web.push_frame(np.column_stack([xy, z]))
                 else:
-                    web.push_frame(xy.copy())
+                    web.push_frame(xy)
 
         callback = _wrapped_callback
 

@@ -98,7 +98,7 @@ class VectorScopePlayer:
                  noise=0.0, fade_period=10.0, noise_type='white',
                  noise_mode='sum', animate_freq_range=None, freq_sign=1,
                  channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
-                 z_gamma=1.0, web_port=None):
+                 z_gamma=1.0, web_port=None, web_scale_factor=1.0):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
         self.secs = 1.0 / self.freq
@@ -117,6 +117,7 @@ class VectorScopePlayer:
         self._last_trace_phase = 0.0
         self._frac_position = 0.0
         self._web_port = web_port
+        self._web_scale_factor = web_scale_factor
         self._web_server = None
         self._command_name = None
 
@@ -697,6 +698,8 @@ class VectorScopePlayer:
         if self._web_port is not None:
             from .web import VectorscopeWebServer
             self._web_server = VectorscopeWebServer(self._web_port)
+            self._web_server.set_z_amp(self.z_amp)
+            self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
             # Send initial metadata
             self._web_server.push_metadata({
@@ -818,6 +821,8 @@ def add_common_args(parser, freq_default=100, rate_default=48000):
                         help="Enable web-based oscilloscope viewer")
     parser.add_argument("--web-port", type=int, default=8080,
                         help="Port for web viewer")
+    parser.add_argument("--web-scale-factor", type=float, default=1.0,
+                        help="Scale factor for the web viewer")
 
 
 def common_args_from_parsed(args):
@@ -839,4 +844,5 @@ def common_args_from_parsed(args):
         'z_blank': args.z_blank,
         'z_gamma': args.z_gamma,
         'web_port': args.web_port if getattr(args, 'web', False) else None,
+        'web_scale_factor': args.web_scale_factor,
     }
