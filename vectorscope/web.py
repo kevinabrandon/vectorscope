@@ -316,16 +316,20 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes">
 <title>Vectorscope</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; color: #b0b0b0; font-family: 'Courier New', monospace;
-       display: flex; flex-direction: column; align-items: center; height: 100vh; overflow: hidden; }
-#container { position: relative; flex: 1; display: flex; align-items: center;
-             justify-content: center; width: 100%; background: #000; }
+       min-height: 100vh; overflow: auto; display: flex; flex-direction: column; align-items: center; }
+#container { position: relative; flex: 1; display: flex; flex-direction: column;
+             align-items: center; justify-content: center;
+             width: fit-content; min-width: 100%; background: #000; padding: 20px; }
 #scope-body { display: flex; align-items: stretch; background: #ccc; border-radius: 4px;
-              box-shadow: 0 10px 40px rgba(0,0,0,0.8); overflow: visible; }
+              box-shadow: 0 10px 40px rgba(0,0,0,0.8); overflow: visible; margin: 20px auto; }
+footer { text-align: center; padding: 20px; opacity: 0.4; }
+footer a { color: #888; text-decoration: none; }
+footer a:hover { text-decoration: underline; }
 #bezel { position: relative; background: #333; border-radius: 4px;
          box-shadow: inset 0 2px 15px rgba(0,0,0,0.6), 0 1px 2px rgba(255,255,255,0.1); }
 #bezel-title { position: absolute; left: 0; width: 100%;
@@ -371,6 +375,10 @@ canvas { display: block; background: #000; border-radius: 2px; }
           <div class="dial-label">INTENSITY</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
         </div>
+        <div class="dial-group" data-grid="4" data-param="persist">
+          <div class="dial-label">PERSIST</div>
+          <div class="dial dial-sm"><div class="dial-pointer"></div></div>
+        </div>
         <div class="dial-group" data-grid="6" data-param="focus">
           <div class="dial-label">FOCUS</div>
           <div class="dial dial-sm"><div class="dial-pointer"></div></div>
@@ -414,6 +422,9 @@ canvas { display: block; background: #000; border-radius: 2px; }
       </div>
     </div>
   </div>
+  <footer>
+    <a href="https://github.com/kevinabrandon/vectorscope" target="_blank">github.com/kevinabrandon/vectorscope</a>
+  </footer>
 </div>
 <script>
 (function() {
@@ -421,11 +432,15 @@ canvas { display: block; background: #000; border-radius: 2px; }
   const ctx = canvas.getContext('2d');
   const statusEl = document.getElementById('bezel-status');
 
+  const offCanvas = document.createElement('canvas');
+  const offCtx = offCanvas.getContext('2d');
+
   let channels = 2;
   let zAmp = 1.0;
   let scaleFactor = 1.0;
   let pendingFrames = [];
   let intensityScale = 0.75; // Initial centered value
+  let persistScale = 0.5; // New persistence parameter
   let focusScale = 0.0; // 0.0 is focused, higher is blurred
   let voltsX = 0.5;
   let voltsY = 0.5;
@@ -436,27 +451,49 @@ canvas { display: block; background: #000; border-radius: 2px; }
   const controlsEl = document.getElementById('controls');
   function resize() {
     const container = document.getElementById('container');
-    const maxW = container.clientWidth;
-    const maxH = container.clientHeight;
+    const maxW = window.innerWidth - 40;
+    const maxH = window.innerHeight - 40;
 
-    // Sizing constant: pad = ch / 10
-    let ch = Math.min(maxH / 1.25, maxW / 2.85);
-    let cw = Math.max(200, Math.round(ch * 1.25));
-    ch = Math.max(160, Math.round(ch));
+    if (maxW <= 0 || maxH <= 0) return;
+
+    // Sizing: prioritize fitting everything on screen, but maintain aspect ratio.
+    // On desktop, we want wide margins. On mobile, we fill more.
+    const isMobile = window.innerWidth < 800;
+    
+    // Ideal ratio: screen(1.25) + bezel(0.2) + 3 sections(0.25*3) + 4 gaps(0.05*4) = ~2.4
+    const totalRatio = 2.4; 
+    
+    let ch = Math.min(maxH / 1.2, maxW / totalRatio);
+    // Minimum usable height
+    ch = Math.max(isMobile ? 120 : 160, ch);
+    
+    let cw = Math.round(ch * 1.25);
     const pad = Math.round(ch / 10);
+    const chassisPad = Math.round(ch / 20);
     const secW = Math.round(ch * 0.25);
+    
+    // Proportional stroke widths
+    canvas.dataset.baseStroke = (ch / 800).toFixed(2);
     
     canvas.width = cw;
     canvas.height = ch;
+    offCanvas.width = cw;
+    offCanvas.height = ch;
     
-    container.style.padding = `${pad}px`;
+    container.style.padding = `${chassisPad}px`;
     const scopeBody = document.getElementById('scope-body');
-    scopeBody.style.padding = `${pad}px`;
+    scopeBody.style.padding = `${chassisPad}px`;
+    
+    // Add outer bezel (mid-gray, half padding width)
+    const outerBezelWidth = Math.max(1, Math.round(chassisPad / 2));
+    scopeBody.style.border = `${outerBezelWidth}px solid #777`;
+    scopeBody.style.borderRadius = `${Math.round(ch / 40)}px`;
+    
     scopeBody.style.overflow = 'visible';
     bezel.style.padding = `${pad}px`;
 
     // Internal spacing between sections
-    bezel.style.marginRight = `${pad}px`;
+    bezel.style.marginRight = `${chassisPad}px`;
     const sections = document.querySelectorAll('.ctrl-section');
     const titleFontSize = Math.max(8, Math.round(pad * 0.45));
     
@@ -470,10 +507,17 @@ canvas { display: block; background: #000; border-radius: 2px; }
       title.style.top = `${-Math.round(pad * 0.75)}px`; // Place above box
       
       if (i < sections.length - 1) {
-        s.style.marginRight = `${pad}px`;
+        s.style.marginRight = `${chassisPad}px`;
       } else {
         s.style.marginRight = '0';
       }
+
+      // Position dials in this section
+      const dials = s.querySelectorAll('.dial-group');
+      dials.forEach((d) => {
+        const line = parseInt(d.dataset.grid);
+        d.style.top = `${Math.round((line / 8) * ch)}px`;
+      });
     });
 
     const bezelTitle = document.getElementById('bezel-title');
@@ -496,9 +540,10 @@ canvas { display: block; background: #000; border-radius: 2px; }
     document.querySelectorAll('.dial-sm').forEach(d => {
       d.style.width = `${smSize}px`; d.style.height = `${smSize}px`;
     });
-    // Position titles and dials on grid lines (8 rows, 9 lines 0-8)
+    // Position titles on grid lines (8 rows, 9 lines 0-8)
     document.querySelectorAll('[data-grid]').forEach(el => {
       if (el.classList.contains('ctrl-title')) return;
+      if (el.classList.contains('dial-group')) return; // Dials handled above
       const line = parseInt(el.dataset.grid);
       el.style.top = `${Math.round((line / 8) * ch)}px`;
     });
@@ -531,12 +576,13 @@ canvas { display: block; background: #000; border-radius: 2px; }
     drawGraticule();
   }
   window.addEventListener('resize', resize);
-  resize();
+  setTimeout(resize, 50);
 
   function drawGraticule() {
     const w = canvas.width, h = canvas.height;
+    const baseStroke = parseFloat(canvas.dataset.baseStroke || 1.0);
     ctx.strokeStyle = '#000';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = baseStroke;
     const cols = 10, rows = 8;
     for (let i = 0; i <= cols; i++) {
       const x = (i / cols) * w;
@@ -549,7 +595,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
     
     // Draw Center Axes with Ticks
     ctx.strokeStyle = '#111';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = baseStroke * 1.5;
     const cx = w / 2;
     const cy = h / 2;
     
@@ -584,48 +630,37 @@ canvas { display: block; background: #000; border-radius: 2px; }
   function drawTrace(floats) {
     const w = canvas.width, h = canvas.height;
     const s = h, ox = (w - h) / 2;
-    // Server sends 2 (XY) or 3 (XY+Z) floats per sample
     const stride = Math.min(channels, 3);
     const numPts = Math.floor(floats.length / stride);
     if (numPts < 2) return;
 
-    // Scale intensity: 0.0 to 1.0 (with 0.75 center)
-    // Adjust level based on focus (dimmer when out of focus)
-    const level = intensityScale * (1.0 - (focusScale * 0.5));
+    offCtx.clearRect(0, 0, w, h);
+    offCtx.globalAlpha = Math.min(1, intensityScale);
 
-    // Width adjustments for focus
-    const coreWidth = 1.5 + (1.0 * (1.0 - focusScale)) + (focusScale * 8.0);
-    const glowWidth = 6.0 + (focusScale * 25.0);
+    const baseStroke = parseFloat(canvas.dataset.baseStroke || 1.0);
 
-    // Volts/Div scaling: true to grid (10 cols X, 8 rows Y)
     const scaleX = (0.25 * scaleFactor) / voltsX;
     const scaleY = (0.25 * scaleFactor) / voltsY;
+    const coreWidth = baseStroke * 2.0;
 
     if (stride < 3) {
-      // Draw glow pass (wide, dim)
-      ctx.strokeStyle = `rgba(0, 255, 65, ${0.12 * level})`;
-      ctx.lineWidth = glowWidth;
-      ctx.beginPath();
+      offCtx.strokeStyle = '#00ff41';
+      offCtx.lineWidth = coreWidth;
+      offCtx.beginPath();
       for (let i = 0; i < numPts; i++) {
         const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
         const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (i === 0) offCtx.moveTo(x, y);
+        else offCtx.lineTo(x, y);
       }
-      ctx.stroke();
-      // Draw bright core
-      ctx.strokeStyle = '#00ff41';
-      ctx.globalAlpha = Math.min(1, level);
-      ctx.lineWidth = coreWidth;
-      ctx.stroke();
-      ctx.globalAlpha = 1.0;
+      offCtx.stroke();
     } else {
       // Z-channel: batch visible segments into subpaths, skip blanked
       let prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
       let prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
       let hasPartial = false;
 
-      ctx.beginPath();
+      offCtx.beginPath();
       let inSub = false;
       for (let i = 1; i < numPts; i++) {
         const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
@@ -633,11 +668,11 @@ canvas { display: block; background: #000; border-radius: 2px; }
         const zRaw = floats[i * stride + 2];
         
         const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
-        const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5)) * level;
+        const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5));
         
         if (intensity > 0.005) {
-          if (!inSub) { ctx.moveTo(prevX, prevY); inSub = true; }
-          ctx.lineTo(x, y);
+          if (!inSub) { offCtx.moveTo(prevX, prevY); inSub = true; }
+          offCtx.lineTo(x, y);
           if (intensity < 0.995) hasPartial = true;
         } else {
           inSub = false;
@@ -645,18 +680,14 @@ canvas { display: block; background: #000; border-radius: 2px; }
         prevX = x;
         prevY = y;
       }
-      // Glow pass (always batched)
-      ctx.strokeStyle = `rgba(0, 255, 65, ${0.12 * level})`;
-      ctx.lineWidth = glowWidth;
-      ctx.stroke();
 
-      if (!hasPartial && level >= 0.99) {
+      if (!hasPartial && intensityScale >= 0.99) {
         // All visible at full intensity — batched core (fast path)
-        ctx.strokeStyle = '#00ff41';
-        ctx.lineWidth = coreWidth;
-        ctx.stroke();
+        offCtx.strokeStyle = '#00ff41';
+        offCtx.lineWidth = coreWidth;
+        offCtx.stroke();
       } else {
-        // Variable intensity — per-segment core over batched glow
+        // Variable intensity — per-segment core
         prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
         prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
         for (let i = 1; i < numPts; i++) {
@@ -665,28 +696,34 @@ canvas { display: block; background: #000; border-radius: 2px; }
           const zRaw = floats[i * stride + 2];
           
           const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
-          const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5)) * level;
+          const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5));
           
           if (intensity > 0.005) {
             const adj = Math.min(1, intensity * intensity);
             const green = Math.round(40 + 215 * adj);
             const alpha = Math.min(1, 0.03 + 0.97 * adj);
             
-            // Scaled core width based on per-segment intensity and global focus
+            // Scaled core width based on per-segment intensity
             const segCoreWidth = (1.0 + (1.0 * adj)) * (coreWidth / 2.0);
             
-            ctx.lineWidth = segCoreWidth;
-            ctx.strokeStyle = `rgba(0, ${green}, 40, ${alpha})`;
-            ctx.beginPath();
-            ctx.moveTo(prevX, prevY);
-            ctx.lineTo(x, y);
-            ctx.stroke();
+            offCtx.lineWidth = segCoreWidth;
+            offCtx.strokeStyle = `rgba(0, ${green}, 40, ${alpha})`;
+            offCtx.beginPath();
+            offCtx.moveTo(prevX, prevY);
+            offCtx.lineTo(x, y);
+            offCtx.stroke();
           }
           prevX = x;
           prevY = y;
         }
       }
     }
+
+    // Apply the blur ONCE to the entire trace result
+    const blurPx = focusScale * 6.0;
+    ctx.filter = blurPx > 0.1 ? `blur(${blurPx}px)` : 'none';
+    ctx.drawImage(offCanvas, 0, 0);
+    ctx.filter = 'none';
   }
 
   let lastAnimTime = 0;
@@ -696,8 +733,15 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const dt = lastAnimTime ? (now - lastAnimTime) / 1000 : 0.016;
     lastAnimTime = now;
 
-    // Time-based phosphor decay: ~0.5s to fade to near-zero
-    const decay = 1 - Math.pow(0.02, dt / 0.5);
+    // Map persistScale (0.0 to 1.0) to a decay time (seconds)
+    // 0.0 -> ~0.1s (sharp)
+    // 0.5 -> ~1.0s (default-ish)
+    // 1.0 -> ~10.0s (long trail)
+    const decayTime = Math.pow(10, persistScale * 2 - 1); 
+    
+    // Time-based phosphor decay: fade to near-zero over decayTime
+    const decay = 1 - Math.pow(0.01, dt / decayTime);
+    ctx.filter = 'none';
     ctx.fillStyle = `rgba(40, 120, 110, ${decay})`;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     drawGraticule();
@@ -729,12 +773,9 @@ canvas { display: block; background: #000; border-radius: 2px; }
     // Handle parameter changes
     const group = activeDial.closest('.dial-group');
     if (group && group.dataset.param === 'intensity') {
-      // Map [-135, 135] to [0.0, 1.0] where center (0) is 0.75
-      if (angle <= 0) {
-        intensityScale = (angle + 135) / 135 * 0.75;
-      } else {
-        intensityScale = 0.75 + (angle / 135 * 0.25);
-      }
+      intensityScale = (angle + 135) / 270;
+    } else if (group && group.dataset.param === 'persist') {
+      persistScale = (angle + 135) / 270;
     } else if (group && group.dataset.param === 'focus') {
       focusScale = Math.abs(angle) / 135;
     } else if (group && (group.dataset.param === 'volts_x' || group.dataset.param === 'volts_y')) {
