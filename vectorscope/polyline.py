@@ -86,7 +86,8 @@ def optimize_contour_order(polys):
 
 def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
                     margin=0.9, optimize_order=True,
-                    min_points_per_segment=2, normalize=True):
+                    min_points_per_segment=2, normalize=True,
+                    intensities=None):
     """Unified polyline-to-XY pipeline.
 
     Args:
@@ -98,17 +99,27 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         optimize_order: If True, reorder contours to minimize beam travel.
         min_points_per_segment: Minimum points per resampled segment.
         normalize: If True, automatically center and scale to [-1, 1].
+        intensities: Optional list of floats (0-1) for each polyline.
 
     Returns:
-        (xy_data, blanking) where xy_data is float32 (samples, 2)
-        and blanking is bool (samples,).
+        (xy_data, blanking, intensity_data) where xy_data is float32 (samples, 2),
+        blanking is bool (samples,), and intensity_data is float32 (samples,).
     """
     # Filter short segments
-    polys = [p for p in polys if len(p) >= 2]
+    if intensities is not None:
+        new_polys, new_intensities = [], []
+        for p, inten in zip(polys, intensities):
+            if len(p) >= 2:
+                new_polys.append(p)
+                new_intensities.append(inten)
+        polys, intensities = new_polys, new_intensities
+    else:
+        polys = [p for p in polys if len(p) >= 2]
 
     if not polys:
         return (np.zeros((samples, 2), dtype=np.float32),
-                np.zeros(samples, dtype=bool))
+                np.zeros(samples, dtype=bool),
+                np.ones(samples, dtype=np.float32))
 
     # Normalize
     if normalize:
@@ -116,7 +127,34 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
 
     # Optimize contour order
     if optimize_order:
-        polys = optimize_contour_order(polys)
+        # 1. Reorder contours greedily
+        indices = list(range(len(polys)))
+        remaining = indices[1:]
+        ordered = [indices[0]]
+        while remaining:
+            prev_end = polys[ordered[-1]][-1]
+            best_idx = min(remaining,
+                           key=lambda j: ((polys[j][0] - prev_end) ** 2).sum())
+            remaining.remove(best_idx)
+            ordered.append(best_idx)
+        
+        # 2. Map original intensities to the new order
+        if intensities is not None:
+            intensities = [intensities[i] for i in ordered]
+        
+        # 3. Apply the new order and rotate closed polylines
+        polys = [polys[i] for i in ordered]
+        new_polys = [polys[0]]
+        for k in range(1, len(polys)):
+            prev_end = new_polys[-1][-1]
+            poly = polys[k]
+            if np.allclose(poly[0], poly[-1], atol=1e-10):
+                dists = ((poly[:-1] - prev_end) ** 2).sum(axis=1)
+                best = int(np.argmin(dists))
+                if best != 0:
+                    poly = np.vstack([poly[best:-1], poly[:best + 1]])
+            new_polys.append(poly)
+        polys = new_polys
 
     # Allocate samples across contours.
     # We must ensure each contour gets at least min_points_per_segment.
@@ -145,10 +183,13 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
     # Build XY sequence with pen lifts between contours
     out = []
     blanking_parts = []
+    intensity_parts = []
     for i, (p, n) in enumerate(zip(polys, segment_counts)):
         pts = resample_polyline(p, n)
         out.append(pts)
         blanking_parts.append(np.zeros(len(pts), dtype=bool))
+        inten = intensities[i] if intensities is not None else 1.0
+        intensity_parts.append(np.full(len(pts), inten, dtype=np.float32))
 
         if pen_lift_samples > 0 and i < len(polys) - 1:
             start_pt = pts[-1]
@@ -157,6 +198,7 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
             lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
             out.append(lift)
             blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
+            intensity_parts.append(np.zeros(pen_lift_samples, dtype=np.float32))
 
     # Closing pen lift: wrap from end of last contour back to start of first
     if pen_lift_samples > 0 and out:
@@ -166,9 +208,11 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
         out.append(lift)
         blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
+        intensity_parts.append(np.zeros(pen_lift_samples, dtype=np.float32))
 
     xy = np.vstack(out)
     blanking = np.concatenate(blanking_parts)
+    intensity_data = np.concatenate(intensity_parts)
 
     # Pad or truncate to exact sample count
     if len(xy) < samples:
@@ -176,11 +220,13 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         padding = np.tile(xy[-1], (pad_n, 1))
         xy = np.vstack([xy, padding])
         blanking = np.concatenate([blanking, np.ones(pad_n, dtype=bool)])
+        intensity_data = np.concatenate([intensity_data, np.zeros(pad_n, dtype=np.float32)])
     else:
         xy = xy[:samples]
         blanking = blanking[:samples]
+        intensity_data = intensity_data[:samples]
 
     # Amplitude clip
     xy = np.clip(xy * amp, -1.0, 1.0).astype(np.float32)
 
-    return xy, blanking
+    return xy, blanking, intensity_data

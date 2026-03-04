@@ -83,6 +83,7 @@ class Ship(Shooter):
         
     def increaseThrust(self, step=1.0):
         playSoundContinuous("thrust")
+        self.thrustJet.accelerating = True
         if math.hypot(self.heading.x, self.heading.y) > self.maxVelocity:
             return
         
@@ -92,13 +93,8 @@ class Ship(Shooter):
     
     def decreaseThrust(self, step=1.0):
         stopSound("thrust")
-        if (self.heading.x == 0 and self.heading.y == 0):
-            return;
-        
-        dx = self.heading.x * self.decelaration * step
-        dy = self.heading.y * self.decelaration * step
-        self.changeVelocity(dx, dy)
-    
+        self.thrustJet.accelerating = False
+
     def changeVelocity(self, dx, dy):
         self.heading.x += dx;
         self.heading.y += dy;
@@ -107,7 +103,12 @@ class Ship(Shooter):
         
     def move(self, step=1.0):
         VectorSprite.move(self, step)
-        self.decreaseThrust(step)
+        
+        # Continuous deceleration
+        if not (self.heading.x == 0 and self.heading.y == 0):
+            dx = self.heading.x * self.decelaration * step
+            dy = self.heading.y * self.decelaration * step
+            self.changeVelocity(dx, dy)
 
     # Break the shape of the ship down into several lines
     # Ship shape - [(0, -10), (6, 10), (3, 7), (-3, 7), (-6, 10)]    

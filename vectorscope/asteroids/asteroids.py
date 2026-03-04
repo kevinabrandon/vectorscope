@@ -41,29 +41,35 @@ class VectorRenderer:
         if isinstance(color, tuple) and len(color) >= 3:
             if color[0] <= 0 and color[1] <= 0 and color[2] <= 0:
                 return
-        passes = max(1, int(getattr(sprite, "bright_passes", 1)))
+        
+        # High-intensity for small/fast objects, standard for others
+        from .util.vectorsprites import Point
+        if isinstance(sprite, Point) or sprite.__class__.__name__ == 'ThrustJet':
+            intensity = 1.0
+        else:
+            intensity = 0.5
 
         def draw_once():
             x0, y0 = self._map(points[0][0], points[0][1])
-            self.builder.move_to(x0, y0)
-            for p in points[1:]:
+            self.builder.move_to(x0, y0, intensity=intensity)
+            
+            px, py = x0, y0
+            for p in points[1:] + [points[0]]: # Iterate all segments including closing
                 if self.segments_used >= self.max_vectors:
                     return False
                 x1, y1 = self._map(p[0], p[1])
-                self.builder.line_to(x1, y1)
-                self.segments_used += 1
-            if self.segments_used >= self.max_vectors:
-                return False
-            x1, y1 = self._map(points[0][0], points[0][1])
-            self.builder.line_to(x1, y1)
-            self.segments_used += 1
+                
+                # Detect wrap-around jump (> 50% of screen)
+                if abs(x1 - px) > self.maxc * 0.5 or abs(y1 - py) > self.maxc * 0.5:
+                    self.builder.move_to(x1, y1, intensity=intensity)
+                else:
+                    self.builder.line_to(x1, y1)
+                    self.segments_used += 1
+                
+                px, py = x1, y1
             return True
 
-        for _ in range(passes):
-            if self.segments_used >= self.max_vectors:
-                return
-            if not draw_once():
-                return
+        draw_once()
 
 
 class Asteroids:
@@ -121,7 +127,7 @@ class Asteroids:
         self.stage.clear()
         self.gameState = "playing"
         self.score = 0
-        self.lives = 1
+        self.lives = 0
         self.livesList = []
         self.rockList = []
         self.numRocks = self.initial_rocks
@@ -154,6 +160,7 @@ class Asteroids:
         self.show_help = False
         self.reset_attract()
         self.lives = p['lives']
+        self.createNewShip()
 
     def continue_game(self):
         """Continue after game over, keeping score and rocks."""
@@ -450,9 +457,6 @@ class Asteroids:
         self.explodingCount = 0.0
         if not self.attract_mode:
             self.lives -= 1
-            if self.livesList:
-                ship = self.livesList.pop()
-                self.stage.removeSprite(ship)
         self.stage.removeSprite(self.ship)
         self.stage.removeSprite(self.ship.thrustJet)
         self.gameState = "exploding"
@@ -480,15 +484,7 @@ class Asteroids:
         if self.score > 0 and self.score > self.nextLife:
             playSound("extralife")
             self.nextLife += 10000
-            self.addLife(self.lives)
-
-    def addLife(self, lifeNumber):
-        self.lives += 1
-        ship = Ship(self.stage)
-        self.stage.addSprite(ship)
-        ship.position.x = self.stage.width - (lifeNumber * 20) - 10
-        ship.position.y = 20
-        self.livesList.append(ship)
+            self.lives += 1
 
     def step(self, dt, builder, max_vectors):
         if dt < 0:
@@ -523,7 +519,14 @@ class Asteroids:
             return int(round(cx + (x - cx) * self.aspect_x))
 
         score_str = f"{self.score:06d}"
-        builder.text_at(map_x(80), int(self.maxc - 120), score_str, size=3.5, rot=0)
+        builder.text_at(map_x(80), int(self.maxc - 120), score_str, size=4.5, rot=0, intensity=0.5)
+
+        if not self.attract_mode:
+            lives_str = f"{max(0, self.lives)}"
+            # Top right
+            builder.text_at(map_x(self.maxc - 150), int(self.maxc - 120), lives_str, size=4.5, rot=0, intensity=0.5)
+
+        center_x = self.maxc * 0.5
 
         if self.show_help:
             sz = 5
@@ -531,16 +534,15 @@ class Asteroids:
             lines = ["0 DEMO", "1 EASY", "2 MEDIUM", "3 HARD"]
             top_y = int(self.maxc * 0.5 + gap * 1.5)
             for i, line in enumerate(lines):
-                builder.text_at(map_x(self.maxc * 0.25), top_y - i * gap, line, size=sz, rot=0)
+                builder.text_at_centered(center_x, top_y - i * gap, line, size=sz, rot=0, intensity=0.5)
         elif self.attract_mode:
             title = "ASTEROIDS"
-            title_x = map_x(self.maxc * 0.1)
             title_y = int(self.maxc * 0.78)
-            builder.text_at(title_x, title_y, title, size=8, rot=0)
+            builder.text_at_centered(center_x, title_y, title, size=8, rot=0, intensity=0.5)
 
             if int(self._time * 1.5) % 2 == 0:
-                builder.text_at(map_x(self.maxc * 0.05), int(self.maxc * 0.65), "PRESS ? FOR HELP", size=4.5, rot=0)
+                builder.text_at_centered(center_x, int(self.maxc * 0.65), "PRESS ? FOR HELP", size=4.5, rot=0, intensity=0.5)
         elif self.gameState == "gameover":
-            builder.text_at(map_x(self.maxc * 0.15), int(self.maxc * 0.55), "GAME OVER", size=7, rot=0)
+            builder.text_at_centered(center_x, int(self.maxc * 0.55), "GAME OVER", size=7, rot=0, intensity=0.5)
             if int(self._time * 1.5) % 2 == 0:
-                builder.text_at(map_x(self.maxc * 0.2), int(self.maxc * 0.4), "C TO CONT", size=4.5, rot=0)
+                builder.text_at_centered(center_x, int(self.maxc * 0.4), "C TO CONT", size=4.5, rot=0, intensity=0.5)
