@@ -1,4 +1,5 @@
-# Generated audio files
+# Generated logs and audio files
+*.log
 *.wav
 
 # Python
