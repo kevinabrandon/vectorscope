@@ -255,6 +255,8 @@ def _build_parser():
         help='Interactive REPL: switch commands and tweak params live',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    interactive_parser.add_argument("start_command", nargs="?", default="circle",
+                                    help="Initial command to run (default: circle)")
     interactive_parser.add_argument("--rate", type=int, default=48000,
                                     help="Sample rate in Hz")
     interactive_parser.add_argument("--device", type=str, default=None,
@@ -267,6 +269,8 @@ def _build_parser():
                                     help="Port for web viewer")
     interactive_parser.add_argument("--web-scale-factor", type=float, default=1.0,
                                     help="Scale factor for the web viewer")
+    interactive_parser.add_argument("--perf-log-period", type=float, default=1.0,
+                                    help="Period in seconds for performance logging")
     interactive_parser.add_argument("--z-amp", type=float, default=1.0,
                                     help="Z output amplitude (0-1)")
     subs['interactive'] = interactive_parser
@@ -521,7 +525,9 @@ def main():
         web_port = args.web_port if getattr(args, 'web', False) else None
         session = InteractiveSession(parser, subparsers, args,
                                      web_port=web_port,
-                                     web_scale_factor=args.web_scale_factor)
+                                     web_scale_factor=args.web_scale_factor,
+                                     perf_log_period=args.perf_log_period,
+                                     start_command=args.start_command)
         session.run()
         return
 

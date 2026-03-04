@@ -17,7 +17,7 @@ def is_hershey_font(name):
     return name in HERSHEY_FONT_NAMES
 
 def build_xy_from_hershey(hf, text, samples, amp, penlift_samples):
-    """Render text with HersheyFonts and return (xy_data, blanking, intensity) arrays.
+    """Render text with HersheyFonts and return (xy_data, blanking, intensity, n_lifts, n_samples) arrays.
 
     Parameters:
         hf: An initialized HersheyFonts instance (font loaded, normalize_rendering called).
@@ -27,8 +27,9 @@ def build_xy_from_hershey(hf, text, samples, amp, penlift_samples):
         penlift_samples: Number of blanked samples between strokes.
 
     Returns:
-        (xy_data, blanking, intensity) where xy_data is float32 shape (samples, 2),
-        blanking is bool shape (samples,), and intensity is float32 shape (samples,).
+        (xy_data, blanking, intensity, n_lifts, n_samples) where xy_data is float32 shape (samples, 2),
+        blanking is bool shape (samples,), intensity is float32 shape (samples,),
+        n_lifts is int, and n_samples is int.
     """
     raw_strokes = hf.strokes_for_text(text)
 

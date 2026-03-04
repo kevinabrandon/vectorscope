@@ -67,7 +67,16 @@ class ZCalPlayer(VectorScopePlayer):
         self.xy_data = xy * self.amp
         self.xy_blanking = blanking
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
+        import time as _time
+        t_start = _time.perf_counter()
+        t_compute_start = _time.perf_counter()
+        
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t_start - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+
         self._check_status(status)
 
         if self.mode == 'delay':
@@ -76,41 +85,72 @@ class ZCalPlayer(VectorScopePlayer):
             self._intensity_callback(outdata, frames)
         else:
             # blanking mode uses xy_data + xy_blanking via _fill_buffer
-            self._fill_buffer(outdata, frames)
-            self._apply_z_channel(outdata, frames)
+            with self._lock:
+                self._fill_buffer(outdata, frames)
+            self._apply_noise(outdata, frames)
+            if self.channels >= 4:
+                outdata[:, 3] = 0.0
             self.global_sample += frames
+            
+            # Simple attribute for static blanking
+            effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
+            self._increment_compute_stats(0, 4, 4, effective_samples)
+            if has_stats:
+                tend = _time.perf_counter()
+                self.stats['callback_time'] += (tend - t_start)
+                self.stats['callback_count'] += 1
+                self.stats['last_callback_end'] = tend
             return
 
+        # Attribute stats
+        effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
+        self._increment_compute_stats(_time.perf_counter() - t_compute_start, 1, 0, effective_samples)
+
+        with self._lock:
+            self._fill_buffer(outdata, frames)
+
+        self._apply_noise(outdata, frames)
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t_start)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _delay_callback(self, outdata, frames):
         """Circle with half bright / half dark for delay calibration."""
         phase = self._compute_trace_phase(frames)
         theta = 2 * np.pi * (phase % 1.0)
-        outdata[:, 0] = (np.cos(theta) * self.amp).astype(np.float32)
-        outdata[:, 1] = (np.sin(theta) * self.amp).astype(np.float32)
+        out_x = (np.cos(theta) * self.amp).astype(np.float32)
+        out_y = (np.sin(theta) * self.amp).astype(np.float32)
+        xy = np.column_stack([out_x, out_y])
 
         if self.z_enabled:
             # Top half (0 to pi) = bright, bottom half (pi to 2pi) = dark
             # Boundary at 12 o'clock when delay is correct
             intensity = np.where(theta <= np.pi, 1.0, 0.0).astype(np.float32)
-            self.z_intensity = intensity
-            self._z_blanking = None
-            self._apply_z_channel(outdata, frames)
+            self._prepare_output(xy, intensities=intensity)
+        else:
+            self._prepare_output(xy)
 
     def _intensity_callback(self, outdata, frames):
         """Circle with Z ramping 0->1 around circumference."""
         phase = self._compute_trace_phase(frames)
         theta = 2 * np.pi * (phase % 1.0)
-        outdata[:, 0] = (np.cos(theta) * self.amp).astype(np.float32)
-        outdata[:, 1] = (np.sin(theta) * self.amp).astype(np.float32)
+        out_x = (np.cos(theta) * self.amp).astype(np.float32)
+        out_y = (np.sin(theta) * self.amp).astype(np.float32)
+        xy = np.column_stack([out_x, out_y])
 
         if self.z_enabled:
             # Linear ramp 0->1 around the circle
             intensity = (theta / (2 * np.pi)).astype(np.float32)
-            self.z_intensity = intensity
-            self._z_blanking = None
-            self._apply_z_channel(outdata, frames)
+            self._prepare_output(xy, intensities=intensity)
+        else:
+            self._prepare_output(xy)
 
     def _on_start(self):
         print(f"Z calibration: {self.mode} mode")
@@ -228,10 +268,10 @@ class ZCalSession:
         self._player = player
         return player
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
         player = self._player
         if player is not None:
-            player.audio_callback(outdata, frames, time, status)
+            player.audio_callback(outdata, frames, time_info, status)
         else:
             outdata.fill(0)
 

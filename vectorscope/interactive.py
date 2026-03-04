@@ -2,6 +2,9 @@
 
 import readline  # noqa: F401 — enables up-arrow history for input()
 import shlex
+import sys
+import select
+import time as _time
 import numpy as np
 import sounddevice as sd
 
@@ -18,7 +21,9 @@ _HIDDEN_PARAMS = frozenset({
 class InteractiveSession:
     """Owns the audio stream and delegates to the current player."""
 
-    def __init__(self, parser, subparsers, args, web_port=None, web_scale_factor=1.0):
+    def __init__(self, parser, subparsers, args, web_port=None, 
+                 web_scale_factor=1.0, perf_log_period=1.0,
+                 start_command="circle"):
         self._parser = parser
         self._subparsers = subparsers  # dict: command name -> subparser
         self._sample_rate = args.rate
@@ -31,37 +36,27 @@ class InteractiveSession:
         self._current_command = None
         self._web_port = web_port
         self._web_scale_factor = web_scale_factor
+        self._perf_log_period = perf_log_period
+        self._start_command = start_command
         self._web_server = None
+        
+        # Performance statistics
+        self.perf_log = open("vectorscope_perf.log", "a", encoding="utf-8")
+        self.stats = {
+            'last_stats_print': _time.monotonic()
+        }
 
     # ------------------------------------------------------------------
     # Audio
     # ------------------------------------------------------------------
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
         player = self.current_player
         if player is not None:
-            player._z_applied = False
-            player.audio_callback(outdata, frames, time, status)
-            # Auto-apply Z if the player's callback didn't
-            if player.z_enabled and not player._z_applied:
-                player._apply_z_channel(outdata, frames)
+            # Standard optimized callback handles fill, noise, and Z
+            player.audio_callback(outdata, frames, time_info, status)
         else:
             outdata.fill(0)
-        if self._web_server is not None:
-            if player is not None:
-                pre_xy = getattr(player, '_pre_delay_xy', None)
-                xy = pre_xy if pre_xy is not None else outdata[:, :2]
-                if player._z_applied:
-                    pre_z = getattr(player, '_pre_delay_z', None)
-                    if pre_z is not None:
-                        web_data = np.column_stack([xy, pre_z])
-                    else:
-                        web_data = np.column_stack([xy, outdata[:, 2]])
-                else:
-                    web_data = xy.copy()
-            else:
-                web_data = outdata[:, :2].copy()
-            self._web_server.push_frame(web_data)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -98,18 +93,49 @@ class InteractiveSession:
         print(f"Commands: {', '.join(self._command_names)}")
         print("Type a command to start, 'help' for info, 'q' to exit.")
 
+        # Start with the requested command
+        self._switch_command([self._start_command])
+
         try:
             while True:
-                try:
-                    line = input("\n> ").strip()
-                except EOFError:
-                    break
-                if not line:
-                    continue
-                self._handle_input(line)
+                # Push data to web server from main thread
+                player = self.current_player
+                if self._web_server is not None and player is not None:
+                    web_data_to_push = None
+                    with player._lock:
+                        if player._web_data is not None:
+                            web_data_to_push = player._web_data
+                            player._web_data = None
+                    
+                    if web_data_to_push is not None:
+                        self._web_server.push_frame(web_data_to_push)
+
+                # Periodically log performance stats for the active player
+                if player is not None:
+                    # Temporary override of command name for interactive mode
+                    orig_cmd = player._command_name
+                    player._command_name = f"int({self._current_command})"
+                    player._check_perf_log()
+                    player._command_name = orig_cmd
+                    # Sync session's print timer with player's
+                    self.stats['last_stats_print'] = player.stats['last_stats_print']
+
+                # Non-blocking check for input
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rlist:
+                    try:
+                        line = sys.stdin.readline().strip()
+                    except EOFError:
+                        break
+                    if not line:
+                        print("> ", end="", flush=True)
+                        continue
+                    self._handle_input(line)
+                    print("> ", end="", flush=True)
         except KeyboardInterrupt:
             pass
         finally:
+            self.perf_log.close()
             stream.stop()
             stream.close()
             if self._web_server:
@@ -153,6 +179,9 @@ class InteractiveSession:
         args.rate = self._sample_rate
         args.device = self._device
         args.channels = self._channels
+        args.z_amp = self._z_amp
+        args.web_scale_factor = self._web_scale_factor
+        args.perf_log_period = self._perf_log_period
         if not hasattr(args, 'z_blank'):
             args.z_blank = True
 

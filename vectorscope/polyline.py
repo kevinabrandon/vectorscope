@@ -102,8 +102,10 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         intensities: Optional list of floats (0-1) for each polyline.
 
     Returns:
-        (xy_data, blanking, intensity_data) where xy_data is float32 (samples, 2),
-        blanking is bool (samples,), and intensity_data is float32 (samples,).
+        (xy_data, blanking, intensity_data, n_penlifts, n_samples) 
+        where xy_data is float32 (samples, 2), blanking is bool (samples,),
+        intensity_data is float32 (samples,), n_penlifts is int, and 
+        n_samples is int.
     """
     # Filter short segments
     if intensities is not None:
@@ -229,4 +231,4 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
     # Amplitude clip
     xy = np.clip(xy * amp, -1.0, 1.0).astype(np.float32)
 
-    return xy, blanking, intensity_data
+    return xy, blanking, intensity_data, len(polys), len(xy)

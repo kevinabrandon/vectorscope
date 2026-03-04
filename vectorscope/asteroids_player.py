@@ -157,20 +157,18 @@ class AsteroidsPlayer(VectorScopePlayer):
             self.game.start_game(difficulty)
         else:
             self.game.attract_mode = True
-        
+        # Hershey font support
         self.hf = HersheyFonts()
         self.hf.load_default_font("futural")
         self.hf.normalize_rendering(1.0)
-        
+
         self.builder = PolylineBuilder(self.hf)
-        
-        # Threading support
-        self._lock = threading.Lock()
-        
+
         # Initial frame
         self._update_frame()
 
     def _update_frame(self):
+        t0 = time.perf_counter()
         now = time.monotonic()
         dt = now - self.last_t
         self.last_t = now
@@ -221,8 +219,8 @@ class AsteroidsPlayer(VectorScopePlayer):
         else:
             current_samples = self.samples
 
-        # Convert to XY
-        new_xy, new_blanking, new_intensities = polylines_to_xy(
+        # Convert to XY and pre-calculate Z/Web signals
+        new_xy, new_blanking, new_intensities, n_lifts, n_samples = polylines_to_xy(
             polys, current_samples, amp=self.amp,
             pen_lift_samples=self.penlift_samples,
             margin=0.9,
@@ -232,23 +230,10 @@ class AsteroidsPlayer(VectorScopePlayer):
             intensities=intensities
         )
         
-        # Thread-safe swap
-        with self._lock:
-            self.xy_data = new_xy
-            self.xy_blanking = new_blanking
-            self.z_intensity = new_intensities
-
-    def audio_callback(self, outdata, frames, time, status):
-        self._check_status(status)
-        
-        # audio_callback must return IMMEDIATELY. 
-        # We only copy existing data here.
-        with self._lock:
-            self._fill_buffer(outdata, frames)
+        # Offload math and preparation from audio thread
+        self._prepare_output(new_xy, new_blanking, new_intensities)
             
-        self._apply_noise(outdata, frames)
-        self._apply_z_channel(outdata, frames)
-        self.global_sample += frames
+        self._increment_compute_stats(time.perf_counter() - t0, len(polys), n_lifts, n_samples)
 
     def _on_start(self):
         print("Asteroids on Oscilloscope!")
@@ -274,27 +259,8 @@ class AsteroidsPlayer(VectorScopePlayer):
                 'channels': self.channels,
             })
 
-        # Wrap callback for web push
-        _original_cb = self.audio_callback
-        web = self._web_server
-
-        def _wrapped_callback(outdata, frames, time_info, status):
-            self._z_applied = False
-            _original_cb(outdata, frames, time_info, status)
-            if self.z_enabled and not self._z_applied:
-                self._apply_z_channel(outdata, frames)
-            if web is not None:
-                # Always use pre-delay data for the web if available, 
-                # as the web player doesn't need hardware delay compensation.
-                xy = self._pre_delay_xy if self._pre_delay_xy is not None else outdata[:, :2].copy()
-                if self._z_applied:
-                    z = self._pre_delay_z if self._pre_delay_z is not None else outdata[:, 2:3].copy()
-                    import numpy as np
-                    web.push_frame(np.column_stack([xy, z]))
-                else:
-                    web.push_frame(xy)
-
-        callback = _wrapped_callback
+        # Use the standard optimized callback
+        callback = self.audio_callback
 
         if self.device == 'demo':
             stream = NullOutputStream(
@@ -329,6 +295,20 @@ class AsteroidsPlayer(VectorScopePlayer):
             while True:
                 # Update frame logic here (NOT in callback)
                 self._update_frame()
+
+                # Push data to web server from main thread
+                if self._web_server is not None:
+                    web_data_to_push = None
+                    with self._lock:
+                        if self._web_data is not None:
+                            web_data_to_push = self._web_data
+                            self._web_data = None
+                    
+                    if web_data_to_push is not None:
+                        self._web_server.push_frame(web_data_to_push)
+
+                # Periodically log performance stats
+                self._check_perf_log()
 
                 if old_settings:
                     # Non-blocking check for input

@@ -93,12 +93,12 @@ class VectorScopePlayer:
     - Setting self.xy_data in __init__ (for static patterns)
     - Overriding audio_callback() (for dynamic/animated patterns)
     """
-
     def __init__(self, sample_rate=48000, freq=100, amp=0.7, device=None,
                  noise=0.0, fade_period=10.0, noise_type='white',
                  noise_mode='sum', animate_freq_range=None, freq_sign=1,
                  channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
-                 z_gamma=1.0, web_port=None, web_scale_factor=1.0):
+                 z_gamma=1.0, web_port=None, web_scale_factor=1.0,
+                 perf_log_period=1.0):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
         self.secs = 1.0 / self.freq
@@ -118,8 +118,28 @@ class VectorScopePlayer:
         self._frac_position = 0.0
         self._web_port = web_port
         self._web_scale_factor = web_scale_factor
+        self._perf_log_period = perf_log_period
         self._web_server = None
         self._command_name = None
+        
+        # Threading support
+        self._lock = threading.Lock()
+
+        # Performance statistics
+        self.perf_log = open("vectorscope_perf.log", "a", encoding="utf-8")
+        self.stats = {
+            'compute_time': 0.0,
+            'compute_count': 0,
+            'callback_time': 0.0,
+            'callback_count': 0,
+            'wait_time': 0.0,
+            'wait_count': 0,
+            'vector_count': 0,
+            'pen_lifts': 0,
+            'samples_count': 0,
+            'last_callback_end': None,
+            'last_stats_print': _time.monotonic()
+        }
 
         # Z-channel (intensity modulation)
         self.channels = channels
@@ -146,6 +166,15 @@ class VectorScopePlayer:
         self._pre_delay_z = None
         self._z_intensity_buf = None
         self._z_applied = False
+        
+        # Pre-calculated output buffers
+        self._z_data = None
+        self._web_data = None
+        
+        # Static metrics caching
+        self._last_n_vectors = 0
+        self._last_n_penlifts = 0
+        self._last_n_samples = 0
 
         # Parse noise type(s): "name", "name:level", comma-separated, or "all"
         raw = noise_type or 'white'
@@ -509,70 +538,116 @@ class VectorScopePlayer:
     # Z-channel (intensity modulation)
     # ------------------------------------------------------------------
 
-    def _apply_z_channel(self, outdata, frames):
-        """Map intensity to Z output and fill spare channels."""
+    def _prepare_output(self, xy, blanking=None, intensities=None):
+        """Pre-calculate Z-channel and Web data for the given XY samples.
+        
+        This method moves heavy math out of the high-pressure audio callback.
+        """
         if not self.z_enabled:
-            self._pre_delay_xy = None
+            with self._lock:
+                self.xy_data = xy.astype(np.float32)
+                self.xy_blanking = blanking
+                self._z_data = None
+                if self._web_server:
+                    self._web_data = xy.astype(np.float32)
             return
 
-        self._z_applied = True
-
-        # Default: full brightness
-        intensity = np.ones(frames, dtype=np.float32)
-
-        # Player-provided intensity (e.g. depth shading or per-object brightness)
-        if hasattr(self, '_z_intensity_buf') and self._z_intensity_buf is not None:
-            intensity = self._z_intensity_buf[:frames].copy()
-        elif self.z_intensity is not None:
-            intensity = self.z_intensity[:frames].copy()
-
-        # Pen-lift blanking
-        if self.z_blank and self._z_blanking is not None:
-            # Crucial: slice blanking mask to current frame count
-            mask = self._z_blanking[:frames]
-            intensity[mask] = 0.0
-
-        # Capture pre-delay state for web viewers (no soundcard delay needed)
-        if self._z_delay_samples != 0:
-            self._pre_delay_xy = outdata[:, :2].copy()
-            pre_delay_intensity = intensity.copy()
-        else:
-            self._pre_delay_xy = None
-            pre_delay_intensity = None
-
-        # Delay compensation (soundcard only)
-        if self._z_delay_samples > 0:
-            # Positive: Z arrives late at scope → delay XY so they arrive together
-            d = self._z_delay_samples
-            xy = outdata[:, :2].copy()
-            full = np.vstack([self._xy_delay_buf, xy])
-            self._xy_delay_buf = full[frames:frames + d].copy()
-            outdata[:, :2] = full[:frames]
-        elif self._z_delay_samples < 0:
-            # Negative: shift Z later (Z arrives early at scope)
-            d = -self._z_delay_samples
-            full = np.concatenate([self._z_delay_buf, intensity])
-            self._z_delay_buf = full[frames:frames + d].copy()
-            intensity = full[:frames]
-
+        samples = len(xy)
+        intensity = np.ones(samples, dtype=np.float32)
+        if intensities is not None:
+            intensity = intensities.copy()
+        
+        if self.z_blank and blanking is not None:
+            intensity[blanking] = 0.0
+            
         # Gamma correction
         if self.z_gamma != 1.0:
             intensity **= self.z_gamma
+            
+        # Map to voltage (inverted: bright = negative voltage)
+        z_signal = (1.0 - 2.0 * intensity) * self.z_amp
+        z_signal = z_signal.astype(np.float32)
 
-        # Map to output (inverted: bright = negative voltage)
-        outdata[:, 2] = (1.0 - 2.0 * intensity) * self.z_amp
+        # Prepare web data (using un-delayed signals)
+        web_data = None
+        if self._web_server:
+            web_data = np.column_stack([xy, z_signal]).astype(np.float32)
 
-        # Compute web Z from pre-delay intensity (with gamma, without delay)
-        if pre_delay_intensity is not None:
-            if self.z_gamma != 1.0:
-                pre_delay_intensity **= self.z_gamma
-            self._pre_delay_z = (1.0 - 2.0 * pre_delay_intensity) * self.z_amp
-        else:
-            self._pre_delay_z = None
+        # Apply delay compensation for physical scope via circular shift (np.roll)
+        # This ensures the looping signal remains perfectly aligned at the boundaries.
+        if self._z_delay_samples > 0:
+            # Positive: Z arrives late → delay XY (shift XY right)
+            xy = np.roll(xy, self._z_delay_samples, axis=0)
+        elif self._z_delay_samples < 0:
+            # Negative: Z arrives early → delay Z (shift Z right)
+            z_signal = np.roll(z_signal, -self._z_delay_samples, axis=0)
 
-        # Zero spare channel
-        if self.channels >= 4:
-            outdata[:, 3] = 0.0
+        with self._lock:
+            self.xy_data = xy.astype(np.float32)
+            self.xy_blanking = blanking
+            self._z_data = z_signal
+            self._web_data = web_data
+            
+            # Cache for static reporting
+            self._last_n_vectors = len(xy) // 10 if blanking is None else int((~blanking).sum() / 10)
+            self._last_n_samples = len(xy)
+            if blanking is not None:
+                # Count transitions as a proxy for pen-lifts
+                self._last_n_penlifts = int(np.sum(np.diff(blanking.astype(int)) > 0))
+            else:
+                self._last_n_penlifts = 0
+
+    def _increment_compute_stats(self, duration, n_vectors, n_penlifts=0, n_samples=0):
+        """Helper for players to record compute time and complexity."""
+        if hasattr(self, 'stats'):
+            self.stats['compute_time'] += duration
+            self.stats['compute_count'] += 1
+            self.stats['vector_count'] += n_vectors
+            self.stats['pen_lifts'] += n_penlifts
+            self.stats['samples_count'] += n_samples
+            
+            # Keep the cache updated for the next "idle" log entry
+            self._last_n_vectors = n_vectors
+            self._last_n_penlifts = n_penlifts
+            self._last_n_samples = n_samples
+
+    def _check_perf_log(self):
+        """Periodically write performance stats to log file."""
+        if not hasattr(self, 'stats'):
+            return
+            
+        now = _time.monotonic()
+        if now - self.stats['last_stats_print'] > self._perf_log_period:
+            st = self.stats
+            dur = now - st['last_stats_print']
+            
+            c_avg = (st['compute_time'] / st['compute_count'] * 1000) if st['compute_count'] > 0 else 0
+            cb_avg = (st['callback_time'] / st['callback_count'] * 1000) if st['callback_count'] > 0 else 0
+            w_avg = (st['wait_time'] / st['wait_count'] * 1000) if st['wait_count'] > 0 else 0
+            v_avg = (st['vector_count'] / st['compute_count']) if st['compute_count'] > 0 else 0
+            p_avg = (st['pen_lifts'] / st['compute_count']) if st['compute_count'] > 0 else 0
+            s_avg = (st['samples_count'] / st['compute_count']) if st['compute_count'] > 0 else 0
+            fps = st['compute_count'] / dur
+            
+            cmd = self._command_name or type(self).__name__
+            ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+            log_line = (f"[{ts}] {cmd:16} | dur: {dur:4.2f}s | cnt: {int(st['compute_count']):3} | "
+                        f"fps: {fps:5.1f} | vcts: {int(v_avg):4} | plfts: {int(p_avg):3} | "
+                        f"smp: {int(s_avg):6} | cmp: {c_avg:5.2f}ms | cbk: {cb_avg:5.2f}ms | "
+                        f"wait: {w_avg:5.2f}ms\n")
+            self.perf_log.write(log_line)            
+            if 'status_messages' in st:
+                for msg in st['status_messages']:
+                    self.perf_log.write(f"{msg}\n")
+                st['status_messages'] = []
+            
+            self.perf_log.flush()
+            
+            # Reset accumulators
+            st['compute_time'] = st['callback_time'] = st['wait_time'] = st['vector_count'] = 0.0
+            st['compute_count'] = st['callback_count'] = st['wait_count'] = 0
+            st['pen_lifts'] = st['samples_count'] = 0
+            st['last_stats_print'] = now
 
     # ------------------------------------------------------------------
     # Trace frequency animation
@@ -607,73 +682,33 @@ class VectorScopePlayer:
     # ------------------------------------------------------------------
 
     def _fill_buffer(self, outdata, frames):
-        """Fill output buffer by looping through xy_data.
-
-        When animate_freq_range is set, uses variable-speed fractional
-        indexing with linear interpolation for smooth speed changes.
-        Also propagates xy_blanking → _z_blanking for Z-channel use.
-        """
+        """Fill output buffer by looping through pre-calculated data."""
         if self.xy_data is None:
             outdata.fill(0)
-            self._z_blanking = None
-            self._z_intensity_buf = None
             return
 
         data_len = len(self.xy_data)
-        has_blanking = self.z_enabled and self.xy_blanking is not None
-        has_z_intensity = self.z_enabled and hasattr(self, 'z_intensity') and self.z_intensity is not None
-
         xy_out = outdata[:, :2]
+        z_out = outdata[:, 2] if self.z_enabled else None
 
-        if self.animate_freq_range is not None:
-            # Variable-speed playback via fractional position stepping
-            freq = self._get_animated_freq(frames)
-            # step_rate: how many xy_data samples to advance per audio sample
-            # At base freq (self.freq), step_rate = 1.0 (normal speed)
-            step_rate = freq * (data_len / self.sample_rate)
-            # Cumulative fractional positions
-            positions = self._frac_position + np.cumsum(step_rate)
-            self._frac_position = positions[-1] % data_len
-            positions = positions % data_len
-            idx0 = positions.astype(int) % data_len
-            idx1 = (idx0 + 1) % data_len
-            frac = (positions - np.floor(positions)).astype(np.float32)
-            xy_out[:] = (self.xy_data[idx0] * (1 - frac[:, np.newaxis]) +
-                         self.xy_data[idx1] * frac[:, np.newaxis])
-            if has_blanking:
-                self._z_blanking = self.xy_blanking[idx0]
-            if has_z_intensity:
-                self._z_intensity_buf = self.z_intensity[idx0]
-        else:
-            out_idx = 0
-            if has_blanking:
-                blanking = np.empty(frames, dtype=bool)
-            if has_z_intensity:
-                intensity_buf = np.empty(frames, dtype=np.float32)
+        # Determine indices for this block
+        out_idx = 0
+        self.position %= data_len
+
+        while out_idx < frames:
+            chunk_size = min(frames - out_idx, data_len - self.position)
+            if chunk_size <= 0:
+                self.position = 0
+                continue
+
+            xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
+            if z_out is not None and self._z_data is not None:
+                z_out[out_idx:out_idx + chunk_size] = self._z_data[self.position:self.position + chunk_size]
             
-            # Ensure position is in bounds (in case data_len changed)
-            self.position %= data_len
+            self.position = (self.position + chunk_size) % data_len
+            out_idx += chunk_size
 
-            while out_idx < frames:
-                chunk_size = min(frames - out_idx, data_len - self.position)
-                if chunk_size <= 0:
-                    # This should be handled by the modulo above, but for safety:
-                    self.position = 0
-                    continue
-
-                xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
-                if has_blanking:
-                    blanking[out_idx:out_idx + chunk_size] = self.xy_blanking[self.position:self.position + chunk_size]
-                if has_z_intensity:
-                    intensity_buf[out_idx:out_idx + chunk_size] = self.z_intensity[self.position:self.position + chunk_size]
-                self.position = (self.position + chunk_size) % data_len
-                out_idx += chunk_size
-            if has_blanking:
-                self._z_blanking = blanking
-            if has_z_intensity:
-                self._z_intensity_buf = intensity_buf
-
-    def _check_status(self, status):
+    def _check_status(self, status, log_func=None):
         """Log audio status, suppressing startup underruns and rate-limiting."""
         if not status:
             return
@@ -685,16 +720,55 @@ class VectorScopePlayer:
         if now - self._last_status_time < 1.0:
             return
         self._last_status_time = now
-        print(f"Audio status: {status}")
+        msg = f"Audio status: {status}"
+        print(msg)
+        if log_func:
+            log_func(msg)
 
-    def audio_callback(self, outdata, frames, time, status):
-        """Sounddevice callback. Override for custom behavior."""
-        self._check_status(status)
+    def audio_callback(self, outdata, frames, time_info, status):
+        """Sounddevice callback. Minimal work mode."""
+        t0 = _time.perf_counter()
+        
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t0 - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+        
+        def log_status(msg):
+            if has_stats:
+                import time as _t
+                ts = _t.strftime("%Y-%m-%d %H:%M:%S")
+                self.stats.setdefault('status_messages', []).append(f"[{ts}] {msg}")
 
-        self._fill_buffer(outdata, frames)
+        self._check_status(status, log_func=log_status)
+
+        with self._lock:
+            # We track whether a dynamic update has already attributed stats 
+            # for this specific audio cycle (e.g. Sinc/Platonic/Asteroids).
+            initial_compute_count = self.stats['compute_count'] if has_stats else 0
+            
+            self._fill_buffer(outdata, frames)
+            
+            # If no dynamic player attributed a refresh this cycle, 
+            # we attribute a "static" refresh from the cache.
+            if has_stats and self.stats['compute_count'] == initial_compute_count:
+                self._increment_compute_stats(0, self._last_n_vectors, 
+                                              self._last_n_penlifts, 
+                                              self._last_n_samples)
+            
         self._apply_noise(outdata, frames)
-        self._apply_z_channel(outdata, frames)
+        
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+            
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t0)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _on_start(self):
         """Called when stream starts. Override for custom message."""
@@ -722,34 +796,8 @@ class VectorScopePlayer:
                 'channels': self.channels,
             })
 
-        # Wrap callback to ensure Z-channel is always applied and
-        # push frames to web server
-        _original_cb = self.audio_callback
-        web = self._web_server
-
-        def _wrapped_callback(outdata, frames, time, status):
-            self._z_applied = False
-            _original_cb(outdata, frames, time, status)
-            # Auto-apply Z if the player's callback didn't
-            if self.z_enabled and not self._z_applied:
-                self._apply_z_channel(outdata, frames)
-            if web is not None:
-                # Use pre-delay XY if available, otherwise raw XY
-                if self._pre_delay_xy is not None:
-                    xy = self._pre_delay_xy
-                else:
-                    xy = outdata[:, :2]
-                # Include Z if z_channel was applied
-                if self._z_applied:
-                    if self._pre_delay_z is not None:
-                        web_data = np.column_stack([xy, self._pre_delay_z])
-                    else:
-                        web_data = np.column_stack([xy, outdata[:, 2]])
-                else:
-                    web_data = xy.copy()
-                web.push_frame(web_data)
-
-        callback = _wrapped_callback
+        # Use the standard optimized callback
+        callback = self.audio_callback
 
         if self.device == 'demo':
             stream = NullOutputStream(
@@ -771,13 +819,28 @@ class VectorScopePlayer:
         self._on_start()
         try:
             while True:
+                # Push data to web server from main thread
+                if self._web_server is not None:
+                    web_data_to_push = None
+                    with self._lock:
+                        if self._web_data is not None:
+                            web_data_to_push = self._web_data
+                            self._web_data = None # Push once per calculation
+                    
+                    if web_data_to_push is not None:
+                        self._web_server.push_frame(web_data_to_push)
+
+                # Periodically log performance stats
+                self._check_perf_log()
+
                 if self.device == 'demo':
-                    stream.sleep(1000)
+                    stream.sleep(10)
                 else:
-                    sd.sleep(1000)
+                    sd.sleep(10)
         except KeyboardInterrupt:
             pass
         finally:
+            self.perf_log.close()
             stream.stop()
             stream.close()
             if self._web_server:
@@ -838,6 +901,8 @@ def add_common_args(parser, freq_default=100, rate_default=48000):
                         help="Port for web viewer")
     parser.add_argument("--web-scale-factor", type=float, default=1.0,
                         help="Scale factor for the web viewer")
+    parser.add_argument("--perf-log-period", type=float, default=1.0,
+                        help="Period in seconds for writing performance stats to log")
 
 
 def common_args_from_parsed(args):
@@ -860,4 +925,5 @@ def common_args_from_parsed(args):
         'z_gamma': args.z_gamma,
         'web_port': args.web_port if getattr(args, 'web', False) else None,
         'web_scale_factor': args.web_scale_factor,
+        'perf_log_period': args.perf_log_period,
     }

@@ -33,7 +33,16 @@ class SpirographPlayer(VectorScopePlayer):
         self.lcm = (self.R * self.r) // math.gcd(self.R, self.r) if self.r != 0 else self.R
         print(f"Spirograph R={self.R}, r={self.r}, d={self.d_default}, freq={self.freq}, rot_freq={self.rot_freq}")
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
+        import time as _time
+        t_start = _time.perf_counter()
+        t_compute_start = _time.perf_counter()
+        
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t_start - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+
         self._check_status(status)
 
         R, r, rot_freq, revolutions = self.R, self.r, self.rot_freq, self.revolutions
@@ -77,11 +86,34 @@ class SpirographPlayer(VectorScopePlayer):
             ry = x * sin_a + y * cos_a
             x, y = rx, ry
 
-        outdata[:, 0] = x * self.amp
-        outdata[:, 1] = y * self.amp
+        xy = np.empty((frames, 2), dtype=np.float32)
+        xy[:, 0] = x * self.amp
+        xy[:, 1] = y * self.amp
+
+        # Prepare signals and swap buffers
+        self._prepare_output(xy)
+        
+        # Attribute stats (spirograph is one continuous curve, so vectors=1)
+        # Total samples for a full loop depends on revolutions
+        effective_samples = int(self.sample_rate / abs(self.freq) * self.revolutions) if self.freq != 0 else frames
+        self._increment_compute_stats(_time.perf_counter() - t_compute_start, 1, 0, effective_samples)
+
+        with self._lock:
+            self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
+        
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t_start)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _on_start(self):
         self._update_params()

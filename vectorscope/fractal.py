@@ -219,18 +219,27 @@ class FractalPlayer(VectorScopePlayer):
 
     def _generate_fractal(self):
         """Generate and prepare fractal XY data."""
+        import time
+        t0 = time.perf_counter()
+        
         fractal_func = FRACTALS[self.fractal_type]
         points = fractal_func(self.iterations)
         points = normalize_points(points)
         xy = resample_path(points, self.samples)
 
-        self.xy_data = np.clip(xy * self.amp, -1.0, 1.0).astype(np.float32)
-
         # Blank the wraparound for open curves (first != last point)
+        blanking = None
         dist = np.linalg.norm(points[-1] - points[0])
         if dist > 1e-6:
-            self.xy_blanking = np.zeros(self.samples, dtype=bool)
-            self.xy_blanking[0] = True
+            blanking = np.zeros(self.samples, dtype=bool)
+            blanking[0] = True
+
+        self._prepare_output(xy, blanking)
+        
+        # Attribute stats (each point-to-point move is 1 vector)
+        n_vectors = len(points) - 1
+        n_lifts = 1 if blanking is not None else 0
+        self._increment_compute_stats(time.perf_counter() - t0, n_vectors, n_lifts, self.samples)
 
     def _on_start(self):
         print(f"📐 {self.fractal_type.title()} fractal (iterations={self.iterations})")

@@ -72,6 +72,14 @@ class VectorscopeWebServer:
         self._lock = threading.Lock()
         self._listen_sock = None
         self._running = False
+        
+        # Web logging
+        self._log_file = open("vectorscope_web.log", "a", encoding="utf-8")
+
+    def _log(self, msg):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._log_file.write(f"[{timestamp}] {msg}\n")
+        self._log_file.flush()
 
     def start(self):
         """Launch accept loop + push loop in daemon threads."""
@@ -93,6 +101,8 @@ class VectorscopeWebServer:
         threading.Thread(target=self._push_loop, daemon=True).start()
 
         print(f"Web viewer: http://localhost:{self._port}/")
+        self._log(f"Server started on port {self._port}")
+        self._log(f"Local access: http://localhost:{self._port}/")
 
     def stop(self):
         """Shutdown server and close client sockets."""
@@ -109,6 +119,8 @@ class VectorscopeWebServer:
                 except OSError:
                     pass
             self._clients.clear()
+        self._log("Server stopped")
+        self._log_file.close()
 
     # ------------------------------------------------------------------
     # Accept loop — one thread per connection
@@ -176,7 +188,7 @@ class VectorscopeWebServer:
         client_key = headers.get("sec-websocket-key", "").strip()
         accept = _ws_accept_key(client_key)
 
-        print(f"[web] WS connect from {addr[0]}")
+        self._log(f"WS connect from {addr[0]}")
 
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.settimeout(2.0) # Prevent slow clients from hanging the push loop
@@ -209,7 +221,7 @@ class VectorscopeWebServer:
             pass
         finally:
             self._remove_client(conn)
-            print(f"[web] WS disconnect from {addr[0]}")
+            self._log(f"WS disconnect from {addr[0]}")
 
     # ------------------------------------------------------------------
     # Client registry

@@ -1,6 +1,7 @@
 """Animated 3D wireframe sinc surface: sin(r)/r with traveling wave."""
 
 import numpy as np
+import time as _time
 
 from .base import VectorScopePlayer
 
@@ -89,6 +90,10 @@ class SincPlayer(VectorScopePlayer):
 
         self.base_path = np.vstack(path_points).astype(np.float64)
         self.base_blanking = np.concatenate(blanking_flags)
+        
+        # Performance metadata
+        self._n_draw_vectors = len(polylines)
+        self._n_lifts = len(polylines) # Between each zig-zag segment plus wrap
 
         # Precompute safe_r for audio_callback
         r_v = self.base_path[:, 2]
@@ -106,7 +111,15 @@ class SincPlayer(VectorScopePlayer):
         max_abs = max(max_px, max_py, 1e-8)
         self._proj_scale = 0.95 / max_abs
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
+        """Sounddevice callback. Minimal work mode."""
+        t_start = _time.perf_counter()
+        t_compute_start = _time.perf_counter()
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t_start - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+
         self._check_status(status)
 
         path_len = len(self.base_path)
@@ -158,22 +171,48 @@ class SincPlayer(VectorScopePlayer):
         py1 = py_table[t_inv, idx1]
         out_y = py0 * (1 - frac) + py1 * frac
 
-        outdata[:, 0] = (out_x * self._proj_scale * self.amp).astype(np.float32)
-        outdata[:, 1] = (out_y * self._proj_scale * self.amp).astype(np.float32)
+        xy = np.empty((frames, 2), dtype=np.float32)
+        xy[:, 0] = (out_x * self._proj_scale * self.amp).astype(np.float32)
+        xy[:, 1] = (out_y * self._proj_scale * self.amp).astype(np.float32)
 
         # Z-channel: depth shading + blanking
+        blanking = None
+        intensity = None
         if self.z_enabled:
-            self._z_blanking = self.base_blanking[idx0]
+            blanking = self.base_blanking[idx0]
             # Depth shading: v (into-screen coord) → intensity (near=bright)
             d0 = depth_table[t_inv, idx0]
             d1 = depth_table[t_inv, idx1]
             depth = d0 * (1 - frac) + d1 * frac
             norm = (self._max_r_xy - depth) / (2.0 * self._max_r_xy + 1e-8)
-            self.z_intensity = (0.15 + 0.85 * norm).astype(np.float32)
+            intensity = (0.15 + 0.85 * norm).astype(np.float32)
+
+        # Pre-calculate voltages/delays and swap buffers
+        self._prepare_output(xy, blanking, intensity)
+        
+        # Attribute stats
+        effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
+        self._increment_compute_stats(_time.perf_counter() - t_compute_start, 
+                                      self._n_draw_vectors, 
+                                      self._n_lifts, 
+                                      effective_samples)
+
+        with self._lock:
+            self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
-        self._apply_z_channel(outdata, frames)
+        
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t_start)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _on_start(self):
         n_verts = int((~self.base_blanking).sum())

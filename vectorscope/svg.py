@@ -65,10 +65,12 @@ class SVGPlayer(VectorScopePlayer):
             return
 
         polys = svg_paths_to_polylines(paths, curve_pts=self.curve_pts)
-        self.xy_data, self.xy_blanking, self.z_intensity = polylines_to_xy(
+        xy, blanking, intensity, n_lifts, n_samples = polylines_to_xy(
             polys, self.samples, amp=self.amp,
             pen_lift_samples=self.pen_lift_samples,
         )
+        self._prepare_output(xy, blanking, intensity)
+        self._increment_compute_stats(0, len(polys), n_lifts, n_samples)
         self.position = 0
 
     def _on_start(self):

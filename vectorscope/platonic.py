@@ -2,6 +2,7 @@
 
 import numpy as np
 from collections import defaultdict
+import time as _time
 
 from .base import VectorScopePlayer
 
@@ -286,15 +287,25 @@ class PlatonicPlayer(VectorScopePlayer):
 
         self.base_path = np.vstack(path_points).astype(np.float32)
         self.base_blanking = np.concatenate(blanking_flags)
+        
+        # Performance metadata
+        self._n_draw_vectors = len([s for s in segments if not s[2]])
+        self._n_lifts = len([s for s in segments if s[2]])
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
+        """Sounddevice callback. Minimal work mode."""
+        t_start = _time.perf_counter()
+        t_compute_start = _time.perf_counter()
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t_start - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+
         self._check_status(status)
 
         path_len = len(self.base_path)
 
-        # Phase-based indexing with linear interpolation so every audio
-        # sample maps to a unique position (no repeated path samples that
-        # would create bright dots from beam dwell time)
+        # Phase-based indexing with linear interpolation
         phase = self._compute_trace_phase(frames) % 1.0
         frac_idx = phase * path_len
         idx0 = frac_idx.astype(int) % path_len
@@ -306,7 +317,6 @@ class PlatonicPlayer(VectorScopePlayer):
 
         # Rotation is locked per trace cycle so every visit to the same
         # vertex within one cycle gets the exact same rotation angle.
-        # Updates at self.freq Hz (e.g. 100x/sec) — visually smooth.
         t = (self.global_sample + np.arange(frames, dtype=np.float64)) / self.sample_rate
         t_rot = np.floor(self.freq * t) / self.freq
 
@@ -332,23 +342,50 @@ class PlatonicPlayer(VectorScopePlayer):
 
         # Perspective projection
         scale = self.perspective / (self.perspective + z2)
-        outdata[:, 0] = x3 * scale * self.amp
-        outdata[:, 1] = y3 * scale * self.amp
+        
+        xy = np.empty((frames, 2), dtype=np.float32)
+        xy[:, 0] = x3 * scale * self.amp
+        xy[:, 1] = y3 * scale * self.amp
 
         # Z-channel: blanking from pen-lift segments
+        blanking = None
+        intensity = None
         if self.z_enabled:
-            self._z_blanking = self.base_blanking[idx0]
+            blanking = self.base_blanking[idx0]
             # Depth intensity: near faces bright, far faces dim
             # Lower z2 = closer to camera (larger perspective scale)
             z_range = z2.max() - z2.min()
             if z_range > 1e-8:
-                self.z_intensity = (0.3 + 0.7 * (z2.max() - z2) / z_range).astype(np.float32)
+                intensity = (0.3 + 0.7 * (z2.max() - z2) / z_range).astype(np.float32)
             else:
-                self.z_intensity = np.ones(frames, dtype=np.float32)
+                intensity = np.ones(frames, dtype=np.float32)
+
+        # Pre-calculate voltages/delays and swap buffers
+        self._prepare_output(xy, blanking, intensity)
+        
+        # Attribute stats
+        effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
+        self._increment_compute_stats(_time.perf_counter() - t_compute_start, 
+                                      self._n_draw_vectors, 
+                                      self._n_lifts, 
+                                      effective_samples)
+
+        with self._lock:
+            self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
-        self._apply_z_channel(outdata, frames)
+        
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t_start)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _on_start(self):
         pen_lifts = int(self.base_blanking.sum()) // max(1, self.pen_lift)
