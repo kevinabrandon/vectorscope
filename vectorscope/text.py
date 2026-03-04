@@ -137,11 +137,11 @@ class TextPlayer(VectorScopePlayer):
         self.text = text
         if self._is_hershey:
             from .hershey_player import build_xy_from_hershey
-            self.xy_data, self.xy_blanking = build_xy_from_hershey(
+            self.xy_data, self.xy_blanking, self.z_intensity = build_xy_from_hershey(
                 self.hf, text, self.samples, self.amp, self.pen_lift_samples
             )
         else:
-            self.xy_data, self.xy_blanking = build_xy_from_text(
+            self.xy_data, self.xy_blanking, self.z_intensity = build_xy_from_text(
                 text,
                 font_family=self.font,
                 curve_pts=self.curve_pts,
@@ -168,9 +168,9 @@ def generate_wav(text, output, rate, freq, amp, font, curve_pts, penlift):
         hf = HersheyFonts()
         hf.load_default_font(font)
         hf.normalize_rendering(1.0)
-        xy, _blanking = build_xy_from_hershey(hf, text, samples, amp, penlift)
+        xy, _blanking, _intensity = build_xy_from_hershey(hf, text, samples, amp, penlift)
     else:
-        xy, _blanking = build_xy_from_text(
+        xy, _blanking, _intensity = build_xy_from_text(
             text,
             font_size=1.0,
             font_family=font,

@@ -144,6 +144,7 @@ class VectorScopePlayer:
             self._z_delay_buf = np.zeros(0, dtype=np.float32)
         self._pre_delay_xy = None
         self._pre_delay_z = None
+        self._z_intensity_buf = None
         self._z_applied = False
 
         # Parse noise type(s): "name", "name:level", comma-separated, or "all"
@@ -519,13 +520,17 @@ class VectorScopePlayer:
         # Default: full brightness
         intensity = np.ones(frames, dtype=np.float32)
 
-        # Player-provided intensity (e.g. depth shading)
-        if self.z_intensity is not None:
+        # Player-provided intensity (e.g. depth shading or per-object brightness)
+        if hasattr(self, '_z_intensity_buf') and self._z_intensity_buf is not None:
+            intensity = self._z_intensity_buf[:frames].copy()
+        elif self.z_intensity is not None:
             intensity = self.z_intensity[:frames].copy()
 
         # Pen-lift blanking
         if self.z_blank and self._z_blanking is not None:
-            intensity[self._z_blanking[:frames]] = 0.0
+            # Crucial: slice blanking mask to current frame count
+            mask = self._z_blanking[:frames]
+            intensity[mask] = 0.0
 
         # Capture pre-delay state for web viewers (no soundcard delay needed)
         if self._z_delay_samples != 0:
@@ -611,10 +616,12 @@ class VectorScopePlayer:
         if self.xy_data is None:
             outdata.fill(0)
             self._z_blanking = None
+            self._z_intensity_buf = None
             return
 
         data_len = len(self.xy_data)
         has_blanking = self.z_enabled and self.xy_blanking is not None
+        has_z_intensity = self.z_enabled and hasattr(self, 'z_intensity') and self.z_intensity is not None
 
         xy_out = outdata[:, :2]
 
@@ -635,10 +642,14 @@ class VectorScopePlayer:
                          self.xy_data[idx1] * frac[:, np.newaxis])
             if has_blanking:
                 self._z_blanking = self.xy_blanking[idx0]
+            if has_z_intensity:
+                self._z_intensity_buf = self.z_intensity[idx0]
         else:
             out_idx = 0
             if has_blanking:
                 blanking = np.empty(frames, dtype=bool)
+            if has_z_intensity:
+                intensity_buf = np.empty(frames, dtype=np.float32)
             
             # Ensure position is in bounds (in case data_len changed)
             self.position %= data_len
@@ -653,10 +664,14 @@ class VectorScopePlayer:
                 xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
                 if has_blanking:
                     blanking[out_idx:out_idx + chunk_size] = self.xy_blanking[self.position:self.position + chunk_size]
+                if has_z_intensity:
+                    intensity_buf[out_idx:out_idx + chunk_size] = self.z_intensity[self.position:self.position + chunk_size]
                 self.position = (self.position + chunk_size) % data_len
                 out_idx += chunk_size
             if has_blanking:
                 self._z_blanking = blanking
+            if has_z_intensity:
+                self._z_intensity_buf = intensity_buf
 
     def _check_status(self, status):
         """Log audio status, suppressing startup underruns and rate-limiting."""

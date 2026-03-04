@@ -61,10 +61,11 @@ class SVGPlayer(VectorScopePlayer):
             print(f"Warning: no paths found in {self.filepath}")
             self.xy_data = np.zeros((self.samples, 2), dtype=np.float32)
             self.xy_blanking = np.zeros(self.samples, dtype=bool)
+            self.z_intensity = np.ones(self.samples, dtype=np.float32)
             return
 
         polys = svg_paths_to_polylines(paths, curve_pts=self.curve_pts)
-        self.xy_data, self.xy_blanking = polylines_to_xy(
+        self.xy_data, self.xy_blanking, self.z_intensity = polylines_to_xy(
             polys, self.samples, amp=self.amp,
             pen_lift_samples=self.pen_lift_samples,
         )

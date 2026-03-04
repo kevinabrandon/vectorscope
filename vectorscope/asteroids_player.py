@@ -17,27 +17,33 @@ from .asteroids.asteroids import Asteroids
 class PolylineBuilder:
     def __init__(self, hf=None):
         self.polylines = []
+        self.intensities = []
         self.current_polyline = []
+        self.current_intensity = 1.0
         self.hf = hf
         if self.hf is None:
             self.hf = HersheyFonts()
             self.hf.load_default_font("futural")
             self.hf.normalize_rendering(1.0)
 
-    def move_to(self, x, y):
-        if len(self.current_polyline) > 1:
+    def move_to(self, x, y, intensity=1.0):
+        if self.current_polyline:
             self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
+            self.intensities.append(self.current_intensity)
         self.current_polyline = [[x, y]]
+        self.current_intensity = intensity
 
     def line_to(self, x, y):
         self.current_polyline.append([x, y])
 
-    def text_at(self, x, y, text, size=1, rot=0):
+    def text_at(self, x, y, text, size=1, rot=0, intensity=1.0):
         if not text:
             return
-        if len(self.current_polyline) > 1:
+        if self.current_polyline:
             self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
+            self.intensities.append(self.current_intensity)
         self.current_polyline = []
+        self.current_intensity = intensity
 
         # HersheyFonts rendering
         # We need to scale and position the text
@@ -71,12 +77,43 @@ class PolylineBuilder:
             pts[:, 0] += x
             pts[:, 1] += y
             self.polylines.append(pts)
+            self.intensities.append(self.current_intensity)
+
+    def text_at_centered(self, x, y, text, size=1, rot=0, intensity=1.0):
+        """Center text horizontally at the given X-coordinate."""
+        if not text:
+            return
+        
+        # Manually calculate width from strokes since get_text_extent doesn't exist
+        strokes = self.hf.strokes_for_text(text)
+        if not strokes:
+            return
+            
+        all_x = []
+        for s in strokes:
+            for p in s:
+                all_x.append(p[0])
+        
+        if not all_x:
+            return
+            
+        width = max(all_x) - min(all_x)
+        scale = size * 25.0
+        offset_x = (width * scale) / 2.0
+        self.text_at(x - offset_x, y, text, size=size, rot=rot, intensity=intensity)
 
     def get_polylines(self):
-        if len(self.current_polyline) > 1:
+        if self.current_polyline:
             self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
+            self.intensities.append(self.current_intensity)
             self.current_polyline = []
-        return self.polylines
+        return self.polylines, self.intensities
+
+    def clear(self):
+        self.polylines = []
+        self.intensities = []
+        self.current_polyline = []
+        self.current_intensity = 1.0
 
 
 class AsteroidsPlayer(VectorScopePlayer):
@@ -96,6 +133,7 @@ class AsteroidsPlayer(VectorScopePlayer):
         self.dynamic_refresh = dynamic_refresh
         self.optimize_order = optimize_order
         self.last_t = time.monotonic()
+        self.last_thrust_time = 0.0
         
         # Calculate a "units per sample" constant based on the initial freq.
         # A circle of radius 1 (circumference ~6.28) at 60Hz and 96k sr
@@ -137,14 +175,19 @@ class AsteroidsPlayer(VectorScopePlayer):
         dt = now - self.last_t
         self.last_t = now
         
+        # Auto-off thruster if no heartbeat for 100ms
+        if self.game.ship and self.game.ship.thrustJet.accelerating:
+            if now - self.last_thrust_time > 0.1:
+                self.game.ship.decreaseThrust()
+
         # Limit dt to avoid massive jumps
         if dt > 0.1:
             dt = 0.1
             
-        self.builder.polylines = []
+        self.builder.clear()
         self.game.step(dt, self.builder, self.max_vectors)
         
-        polys = self.builder.get_polylines()
+        polys, intensities = self.builder.get_polylines()
         
         # Fixed-space normalization
         fixed_polys = []
@@ -179,19 +222,21 @@ class AsteroidsPlayer(VectorScopePlayer):
             current_samples = self.samples
 
         # Convert to XY
-        new_xy, new_blanking = polylines_to_xy(
+        new_xy, new_blanking, new_intensities = polylines_to_xy(
             polys, current_samples, amp=self.amp,
             pen_lift_samples=self.penlift_samples,
             margin=0.9,
             optimize_order=self.optimize_order,
             min_points_per_segment=min_pts,
-            normalize=False
+            normalize=False,
+            intensities=intensities
         )
         
         # Thread-safe swap
         with self._lock:
             self.xy_data = new_xy
             self.xy_blanking = new_blanking
+            self.z_intensity = new_intensities
 
     def audio_callback(self, outdata, frames, time, status):
         self._check_status(status)
@@ -350,6 +395,7 @@ class AsteroidsPlayer(VectorScopePlayer):
         if ch in ('w', 'W'): # Up
             ship.increaseThrust(step * 5)
             ship.thrustJet.accelerating = True
+            self.last_thrust_time = time.monotonic()
         elif ch in ('a', 'A'): # Left
             ship.rotateRight(step * 5)
         elif ch in ('d', 'D'): # Right

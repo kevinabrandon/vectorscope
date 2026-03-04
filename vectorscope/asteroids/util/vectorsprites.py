@@ -105,7 +105,8 @@ class VectorSprite:
 class Point(VectorSprite):
 
     # Class attributes
-    pointlist = [(0,0), (1,1), (1,0), (0,1)]
+    # Slightly larger shape so it's visible on the scope
+    pointlist = [(-2,-2), (2,2), (2,-2), (-2,2), (-2,-2)]
     
     def __init__(self, position, heading, stage):
         VectorSprite.__init__(self, position, heading, self.pointlist)
