@@ -14,24 +14,31 @@ class SpiralPlayer(VectorScopePlayer):
         self.arms = arms
         self.turns = turns
         self.rot_freq = rot_freq
+        self._path_pos = 0
         self._generate_spiral()
 
     def _generate_spiral(self):
         """Generate base spiral path (one frame, no rotation)."""
+        # Ensure we use the full 'samples' budget for all arms combined
         points_per_arm = self.samples // self.arms
+        total_samples = points_per_arm * self.arms
 
         all_points = []
-        blanking = np.zeros(points_per_arm * self.arms, dtype=bool)
+        blanking = np.zeros(total_samples, dtype=bool)
+        
         for arm in range(self.arms):
+            # theta goes from 0 to turns*2pi
             theta = np.linspace(0, self.turns * 2 * np.pi, points_per_arm)
-            r = theta / (self.turns * 2 * np.pi) * 0.95
+            # r goes from 0 to 0.95
+            r = (theta / (self.turns * 2 * np.pi)) * 0.95
 
             arm_offset = arm * (2 * np.pi / self.arms)
             x = r * np.cos(theta + arm_offset)
             y = r * np.sin(theta + arm_offset)
 
             all_points.append(np.column_stack([x, y]))
-            blanking[arm * points_per_arm] = True  # blank jump to this arm
+            # Blank the jump from the end of the previous arm to the start of this one
+            blanking[arm * points_per_arm] = True
 
         self._base_spiral = np.vstack(all_points).astype(np.float32)
         self._base_blanking = blanking
@@ -54,13 +61,13 @@ class SpiralPlayer(VectorScopePlayer):
         
         # Determine indices for this block manually (since we need both XY and Blanking)
         path_len = len(self._base_spiral)
-        self.position %= path_len
+        self._path_pos %= path_len
         out_idx = 0
         while out_idx < frames:
-            chunk = min(frames - out_idx, path_len - self.position)
-            xy_raw[out_idx:out_idx+chunk] = self._base_spiral[self.position:self.position+chunk]
-            blank_raw[out_idx:out_idx+chunk] = self._base_blanking[self.position:self.position+chunk]
-            self.position = (self.position + chunk) % path_len
+            chunk = min(frames - out_idx, path_len - self._path_pos)
+            xy_raw[out_idx:out_idx+chunk] = self._base_spiral[self._path_pos:self._path_pos+chunk]
+            blank_raw[out_idx:out_idx+chunk] = self._base_blanking[self._path_pos:self._path_pos+chunk]
+            self._path_pos = (self._path_pos + chunk) % path_len
             out_idx += chunk
 
         # 2. Apply real-time rotation math
