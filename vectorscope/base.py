@@ -130,6 +130,7 @@ class VectorScopePlayer:
         self.stats = {
             'compute_time': 0.0,
             'compute_count': 0,
+            'refresh_count': 0, # New: track every audio cycle
             'callback_time': 0.0,
             'callback_count': 0,
             'wait_time': 0.0,
@@ -573,14 +574,19 @@ class VectorScopePlayer:
         if self._web_server:
             web_data = np.column_stack([xy, z_signal]).astype(np.float32)
 
-        # Apply delay compensation for physical scope via circular shift (np.roll)
-        # This ensures the looping signal remains perfectly aligned at the boundaries.
+        # Apply delay compensation for physical scope via persistent delay line
         if self._z_delay_samples > 0:
-            # Positive: Z arrives late → delay XY (shift XY right)
-            xy = np.roll(xy, self._z_delay_samples, axis=0)
+            # Positive: Z arrives late → delay XY (shift XY later)
+            d = self._z_delay_samples
+            full = np.vstack([self._xy_delay_buf, xy])
+            self._xy_delay_buf = full[-d:].copy()
+            xy = full[:samples]
         elif self._z_delay_samples < 0:
-            # Negative: Z arrives early → delay Z (shift Z right)
-            z_signal = np.roll(z_signal, -self._z_delay_samples, axis=0)
+            # Negative: Z arrives early → delay Z (shift Z later)
+            d = -self._z_delay_samples
+            full = np.concatenate([self._z_delay_buf, z_signal])
+            self._z_delay_buf = full[-d:].copy()
+            z_signal = full[:samples]
 
         with self._lock:
             self.xy_data = xy.astype(np.float32)
@@ -620,35 +626,37 @@ class VectorScopePlayer:
         if now - self.stats['last_stats_print'] > self._perf_log_period:
             st = self.stats
             dur = now - st['last_stats_print']
-            
+
             c_avg = (st['compute_time'] / st['compute_count'] * 1000) if st['compute_count'] > 0 else 0
             cb_avg = (st['callback_time'] / st['callback_count'] * 1000) if st['callback_count'] > 0 else 0
             w_avg = (st['wait_time'] / st['wait_count'] * 1000) if st['wait_count'] > 0 else 0
-            v_avg = (st['vector_count'] / st['compute_count']) if st['compute_count'] > 0 else 0
-            p_avg = (st['pen_lifts'] / st['compute_count']) if st['compute_count'] > 0 else 0
-            s_avg = (st['samples_count'] / st['compute_count']) if st['compute_count'] > 0 else 0
-            fps = st['compute_count'] / dur
-            
+            v_avg = (st['vector_count'] / st['compute_count']) if st['compute_count'] > 0 else self._last_n_vectors
+            p_avg = (st['pen_lifts'] / st['compute_count']) if st['compute_count'] > 0 else self._last_n_penlifts
+            s_avg = (st['samples_count'] / st['compute_count']) if st['compute_count'] > 0 else self._last_n_samples
+
+            lfps = st['compute_count'] / dur
+            bfps = self.sample_rate / s_avg if s_avg > 0 else 0
+
             cmd = self._command_name or type(self).__name__
             ts = _time.strftime("%Y-%m-%d %H:%M:%S")
-            log_line = (f"[{ts}] {cmd:16} | dur: {dur:4.2f}s | cnt: {int(st['compute_count']):3} | "
-                        f"fps: {fps:5.1f} | vcts: {int(v_avg):4} | plfts: {int(p_avg):3} | "
+            log_line = (f"[{ts}] {cmd:16} | dur: {dur:4.2f}s | lfps: {lfps:5.1f} | "
+                        f"bfps: {bfps:5.1f} | vcts: {int(v_avg):4} | plfts: {int(p_avg):3} | "
                         f"smp: {int(s_avg):6} | cmp: {c_avg:5.2f}ms | cbk: {cb_avg:5.2f}ms | "
                         f"wait: {w_avg:5.2f}ms\n")
-            self.perf_log.write(log_line)            
+            self.perf_log.write(log_line)
+
             if 'status_messages' in st:
                 for msg in st['status_messages']:
                     self.perf_log.write(f"{msg}\n")
                 st['status_messages'] = []
-            
+
             self.perf_log.flush()
-            
+
             # Reset accumulators
             st['compute_time'] = st['callback_time'] = st['wait_time'] = st['vector_count'] = 0.0
-            st['compute_count'] = st['callback_count'] = st['wait_count'] = 0
+            st['compute_count'] = st['refresh_count'] = st['callback_count'] = st['wait_count'] = 0
             st['pen_lifts'] = st['samples_count'] = 0
             st['last_stats_print'] = now
-
     # ------------------------------------------------------------------
     # Trace frequency animation
     # ------------------------------------------------------------------
@@ -743,18 +751,10 @@ class VectorScopePlayer:
         self._check_status(status, log_func=log_status)
 
         with self._lock:
-            # We track whether a dynamic update has already attributed stats 
-            # for this specific audio cycle (e.g. Sinc/Platonic/Asteroids).
-            initial_compute_count = self.stats['compute_count'] if has_stats else 0
-            
             self._fill_buffer(outdata, frames)
             
-            # If no dynamic player attributed a refresh this cycle, 
-            # we attribute a "static" refresh from the cache.
-            if has_stats and self.stats['compute_count'] == initial_compute_count:
-                self._increment_compute_stats(0, self._last_n_vectors, 
-                                              self._last_n_penlifts, 
-                                              self._last_n_samples)
+            if has_stats:
+                self.stats['refresh_count'] += 1
             
         self._apply_noise(outdata, frames)
         

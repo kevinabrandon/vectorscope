@@ -288,6 +288,37 @@ class AsteroidsPlayer(VectorScopePlayer):
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             tty.setraw(fd)
+            
+            # Start asynchronous input thread
+            def input_thread_func():
+                try:
+                    while True:
+                        # We use a short select timeout so we can check if we should stop
+                        rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                        if rlist:
+                            ch = sys.stdin.read(1)
+                            if ch == '\x03': # Ctrl+C
+                                # Trigger stop
+                                import os
+                                import signal
+                                os.kill(os.getpid(), signal.SIGINT)
+                                break
+                            # Read full escape sequence
+                            if ch == '\x1b':
+                                ch2 = sys.stdin.read(1)
+                                if ch2 == '[':
+                                    ch3 = sys.stdin.read(1)
+                                    if ch3 == 'A': ch = 'w'
+                                    elif ch3 == 'B': ch = 's'
+                                    elif ch3 == 'C': ch = 'd'
+                                    elif ch3 == 'D': ch = 'a'
+                            
+                            with self._lock:
+                                self._handle_input(ch)
+                except (EOFError, OSError):
+                    pass
+            
+            threading.Thread(target=input_thread_func, daemon=True).start()
         else:
             old_settings = None
 
@@ -310,29 +341,9 @@ class AsteroidsPlayer(VectorScopePlayer):
                 # Periodically log performance stats
                 self._check_perf_log()
 
-                if old_settings:
-                    # Non-blocking check for input
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.005) # Lower timeout for more responsive game
-                    if rlist:
-                        ch = sys.stdin.read(1)
-                        if ch == '\x03': # Ctrl+C
-                            break
-                        # Read full escape sequence before handling
-                        if ch == '\x1b':
-                            ch2 = sys.stdin.read(1)
-                            if ch2 == '[':
-                                ch3 = sys.stdin.read(1)
-                                if ch3 == 'A':    # Up
-                                    ch = 'w'
-                                elif ch3 == 'B':  # Down
-                                    ch = 's'
-                                elif ch3 == 'C':  # Right
-                                    ch = 'd'
-                                elif ch3 == 'D':  # Left
-                                    ch = 'a'
-                        self._handle_input(ch)
-                else:
-                    time.sleep(0.016) # ~60 FPS update rate
+                # High-frequency update loop (prevents CPU pegging while 
+                # allowing lfps > bfps)
+                time.sleep(0.001)
         except KeyboardInterrupt:
             pass
         finally:
@@ -381,9 +392,11 @@ class AsteroidsPlayer(VectorScopePlayer):
         elif ch in ('d', 'D'): # Right
             ship.rotateLeft(step * 5)
         elif ch in ('s', 'S'): # Down / Fire?
-            ship.fireBullet()
+            if ship.fireBullet():
+                self.game._log("[bullet]", "Player Ship fired bullet.")
         elif ch == ' ':
-            ship.fireBullet()
+            if ship.fireBullet():
+                self.game._log("[bullet]", "Player Ship fired bullet.")
         elif ch in ('h', 'H'):
             ship.hyperspace_exit_pos = self.game.find_safe_position()
             ship.enterHyperSpace()
