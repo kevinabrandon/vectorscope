@@ -55,6 +55,12 @@ class InteractiveSession:
         if player is not None:
             # Standard optimized callback handles fill, noise, and Z
             player.audio_callback(outdata, frames, time_info, status)
+            
+            # If the player is a "static" one that doesn't implement its own 
+            # audio_callback logic to call _prepare_output, we must ensure 
+            # the web data is updated here.
+            if not player._z_applied:
+                player._prepare_output(player.xy_data, player.xy_blanking)
         else:
             outdata.fill(0)
 
@@ -98,19 +104,8 @@ class InteractiveSession:
 
         try:
             while True:
-                # Push data to web server from main thread
-                player = self.current_player
-                if self._web_server is not None and player is not None:
-                    web_data_to_push = None
-                    with player._lock:
-                        if player._web_data is not None:
-                            web_data_to_push = player._web_data
-                            player._web_data = None
-                    
-                    if web_data_to_push is not None:
-                        self._web_server.push_frame(web_data_to_push)
-
                 # Periodically log performance stats for the active player
+                player = self.current_player
                 if player is not None:
                     # Temporary override of command name for interactive mode
                     orig_cmd = player._command_name
@@ -135,6 +130,8 @@ class InteractiveSession:
         except KeyboardInterrupt:
             pass
         finally:
+            if self.current_player is not None:
+                self.current_player._stop_background()
             self.perf_log.close()
             stream.stop()
             stream.close()
@@ -188,10 +185,13 @@ class InteractiveSession:
         # Drop to silence while building the new player — player creation
         # can be CPU-heavy (text rendering, fractals) and would starve
         # the audio callback thread via GIL contention.
+        old_player = self.current_player
         self.current_player = None
+        if old_player is not None:
+            old_player._stop_background()
 
         try:
-            player = _create_player(args)
+            player = _create_player(args, web_server=self._web_server)
         except Exception as e:
             print(f"Error: {e}")
             return
@@ -203,6 +203,7 @@ class InteractiveSession:
         self.current_args = args
         self._current_command = cmd
         player._on_start()
+        player._start_background()
         self._push_web_metadata()
         print()
         self._print_params()
@@ -269,16 +270,20 @@ class InteractiveSession:
         self.current_args.channels = self._channels
 
         # Silence during rebuild (see _switch_command comment)
+        old_player = self.current_player
         self.current_player = None
+        if old_player is not None:
+            old_player._stop_background()
 
         try:
-            player = _create_player(self.current_args)
+            player = _create_player(self.current_args, web_server=self._web_server)
         except Exception as e:
             print(f"Error: {e}")
             return
         if player is None:
             return
         self.current_player = player
+        player._start_background()
         self._push_web_metadata()
         self._print_params(only=set(changed))
 
@@ -390,11 +395,17 @@ class InteractiveSession:
                     params[key] = val
                 elif isinstance(val, list):
                     params[key] = val
-        self._web_server.push_metadata({
+        meta = {
             'command': self._current_command,
             'channels': self._channels,
             'params': params,
-        })
+        }
+        # Include web_channels directly from player's _web_data so the JS
+        # uses the right stride regardless of set_web_channels timing.
+        p = self.current_player
+        if p is not None and p._web_data is not None:
+            meta['web_channels'] = p._web_data.shape[1] if p._web_data.ndim == 2 else 2
+        self._web_server.push_metadata(meta)
 
     # ------------------------------------------------------------------
     # Display

@@ -54,7 +54,7 @@ class CirclePlayer(VectorScopePlayer):
 
         # Prepare signals and swap buffers
         self._prepare_output(xy)
-        
+
         # Attribute stats (circle is one continuous curve, so vectors=1)
         effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
         self._increment_compute_stats(_time.perf_counter() - t_compute_start, 1, 0, effective_samples)
@@ -63,10 +63,12 @@ class CirclePlayer(VectorScopePlayer):
             self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
-        
+
         # Zero spare channel
         if self.channels >= 4:
             outdata[:, 3] = 0.0
+
+        self._push_web_output(outdata, frames)
 
         self.global_sample += frames
 

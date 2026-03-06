@@ -86,10 +86,11 @@ class NgonPlayer(VectorScopePlayer):
             self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
-        
+
         # Zero spare channel
         if self.channels >= 4:
             outdata[:, 3] = 0.0
+        self._push_web_output(outdata, frames)
 
         self.global_sample += frames
 

@@ -176,10 +176,9 @@ class SincPlayer(VectorScopePlayer):
         xy[:, 1] = (out_y * self._proj_scale * self.amp).astype(np.float32)
 
         # Z-channel: depth shading + blanking
-        blanking = None
+        blanking = self.base_blanking[idx0]
         intensity = None
         if self.z_enabled:
-            blanking = self.base_blanking[idx0]
             # Depth shading: v (into-screen coord) → intensity (near=bright)
             d0 = depth_table[t_inv, idx0]
             d1 = depth_table[t_inv, idx1]
@@ -201,10 +200,11 @@ class SincPlayer(VectorScopePlayer):
             self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
-        
+
         # Zero spare channel
         if self.channels >= 4:
             outdata[:, 3] = 0.0
+        self._push_web_output(outdata, frames)
 
         self.global_sample += frames
 

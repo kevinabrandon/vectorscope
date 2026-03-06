@@ -164,6 +164,10 @@ class AsteroidsPlayer(VectorScopePlayer):
 
         self.builder = PolylineBuilder(self.hf)
 
+        # Background update thread (used in interactive mode)
+        self._update_stop_event = threading.Event()
+        self._update_thread = None
+
         # Initial frame
         self._update_frame()
 
@@ -235,6 +239,23 @@ class AsteroidsPlayer(VectorScopePlayer):
             
         self._increment_compute_stats(time.perf_counter() - t0, len(polys), n_lifts, n_samples)
 
+    def _start_background(self):
+        """Start the game update loop in a background thread."""
+        self._update_stop_event.clear()
+        def _loop():
+            while not self._update_stop_event.is_set():
+                self._update_frame()
+                self._update_stop_event.wait(0.001)
+        self._update_thread = threading.Thread(target=_loop, daemon=True)
+        self._update_thread.start()
+
+    def _stop_background(self):
+        """Stop the background game update loop."""
+        self._update_stop_event.set()
+        if self._update_thread is not None:
+            self._update_thread.join(timeout=2.0)
+            self._update_thread = None
+
     def _on_start(self):
         print("Asteroids on Oscilloscope!")
         print("  1 Easy, 2 Medium, 3 Hard")
@@ -254,10 +275,10 @@ class AsteroidsPlayer(VectorScopePlayer):
             self._web_server.set_z_amp(self.z_amp)
             self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
-            self._web_server.push_metadata({
-                'command': 'asteroids',
-                'channels': self.channels,
-            })
+            meta = {'command': 'asteroids', 'channels': self.channels}
+            if self._web_data is not None:
+                meta['web_channels'] = self._web_data.shape[1] if self._web_data.ndim == 2 else 2
+            self._web_server.push_metadata(meta)
 
         # Use the standard optimized callback
         callback = self.audio_callback
@@ -322,31 +343,16 @@ class AsteroidsPlayer(VectorScopePlayer):
         else:
             old_settings = None
 
+        self._start_background()
         try:
             while True:
-                # Update frame logic here (NOT in callback)
-                self._update_frame()
-
-                # Push data to web server from main thread
-                if self._web_server is not None:
-                    web_data_to_push = None
-                    with self._lock:
-                        if self._web_data is not None:
-                            web_data_to_push = self._web_data
-                            self._web_data = None
-                    
-                    if web_data_to_push is not None:
-                        self._web_server.push_frame(web_data_to_push)
-
-                # Periodically log performance stats
+                # Update loop runs in background thread; just log perf here
                 self._check_perf_log()
-
-                # High-frequency update loop (prevents CPU pegging while 
-                # allowing lfps > bfps)
-                time.sleep(0.001)
+                time.sleep(0.05)
         except KeyboardInterrupt:
             pass
         finally:
+            self._stop_background()
             if old_settings:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             stream.stop()

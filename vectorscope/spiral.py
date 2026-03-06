@@ -91,6 +91,7 @@ class SpiralPlayer(VectorScopePlayer):
         self._apply_noise(outdata, frames)
         if self.channels >= 4:
             outdata[:, 3] = 0.0
+        self._push_web_output(outdata, frames)
 
         # Attribute stats
         self._increment_compute_stats(_time.perf_counter() - t_compute_start, self.arms, self.arms, self.samples)

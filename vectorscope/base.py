@@ -98,7 +98,7 @@ class VectorScopePlayer:
                  noise_mode='sum', animate_freq_range=None, freq_sign=1,
                  channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
                  z_gamma=1.0, web_port=None, web_scale_factor=1.0,
-                 perf_log_period=1.0):
+                 perf_log_period=1.0, web_server=None):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
         self.secs = 1.0 / self.freq
@@ -119,7 +119,7 @@ class VectorScopePlayer:
         self._web_port = web_port
         self._web_scale_factor = web_scale_factor
         self._perf_log_period = perf_log_period
-        self._web_server = None
+        self._web_server = web_server
         self._command_name = None
         
         # Threading support
@@ -545,34 +545,44 @@ class VectorScopePlayer:
         This method moves heavy math out of the high-pressure audio callback.
         """
         if not self.z_enabled:
+            xy_f32 = xy.astype(np.float32)
+            if blanking is not None:
+                z_web = np.where(blanking, self.z_amp, -self.z_amp).astype(np.float32)
+                web_data = np.column_stack([xy_f32, z_web])
+                web_ch = 3
+            else:
+                web_data = xy_f32
+                web_ch = 2
             with self._lock:
-                self.xy_data = xy.astype(np.float32)
+                self.xy_data = xy_f32
                 self.xy_blanking = blanking
                 self._z_data = None
+                self._web_data = web_data
+                self._z_applied = True
                 if self._web_server:
-                    self._web_data = xy.astype(np.float32)
+                    self._web_server.set_web_channels(web_ch)
             return
 
         samples = len(xy)
         intensity = np.ones(samples, dtype=np.float32)
         if intensities is not None:
             intensity = intensities.copy()
-        
+
         if self.z_blank and blanking is not None:
             intensity[blanking] = 0.0
-            
+
         # Gamma correction
         if self.z_gamma != 1.0:
             intensity **= self.z_gamma
-            
+
         # Map to voltage (inverted: bright = negative voltage)
         z_signal = (1.0 - 2.0 * intensity) * self.z_amp
         z_signal = z_signal.astype(np.float32)
 
-        # Prepare web data (using un-delayed signals)
-        web_data = None
+        # Prepare web data (using un-delayed signals, always computed for web push)
+        web_data = np.column_stack([xy, z_signal]).astype(np.float32)
         if self._web_server:
-            web_data = np.column_stack([xy, z_signal]).astype(np.float32)
+            self._web_server.set_web_channels(3)
 
         # Apply delay compensation for physical scope via persistent delay line
         if self._z_delay_samples > 0:
@@ -593,6 +603,7 @@ class VectorScopePlayer:
             self.xy_blanking = blanking
             self._z_data = z_signal
             self._web_data = web_data
+            self._z_applied = True
             
             # Cache for static reporting
             self._last_n_vectors = len(xy) // 10 if blanking is None else int((~blanking).sum() / 10)
@@ -689,6 +700,42 @@ class VectorScopePlayer:
     # Buffer / callback / run
     # ------------------------------------------------------------------
 
+    def _push_web_output(self, outdata, frames):
+        """Push post-noise audio output to the web server.
+
+        Call this after _apply_noise.  Works for both static players (which
+        pre-compute _web_data once) and dynamic players (which set _web_data
+        each callback via _prepare_output).
+
+        Uses (position - frames) % n to reconstruct the start position that
+        _fill_buffer used, so the z-blanking column stays aligned with XY.
+        """
+        if self._web_server is None:
+            return
+        with self._lock:
+            web_data_snap = self._web_data
+            data_len = len(self.xy_data) if self.xy_data is not None else 0
+            web_start = (self.position - frames) % data_len if data_len > 0 else 0
+        if web_data_snap is not None and len(web_data_snap) > 0:
+            n = len(web_data_snap)
+            idx = (web_start + np.arange(frames)) % n
+            if web_data_snap.shape[1] >= 3:
+                if self.z_enabled:
+                    # z_enabled=True: use un-delayed XY+Z from web_data_snap entirely.
+                    # outdata[:, :2] has delay-compensated XY for the physical scope;
+                    # the web player should not receive that delay.
+                    web_chunk = web_data_snap[idx]
+                else:
+                    # z_enabled=False: use noisy XY from outdata + synthetic z blanking.
+                    # No delay in 2-channel mode, so outdata XY is correct.
+                    web_chunk = np.column_stack([outdata[:, :2], web_data_snap[idx, 2]])
+            else:
+                web_chunk = outdata[:, :2].copy()
+        else:
+            stride = min(self.channels, 3)
+            web_chunk = outdata[:, :stride].copy()
+        self._web_server.push_frame(web_chunk)
+
     def _fill_buffer(self, outdata, frames):
         """Fill output buffer by looping through pre-calculated data."""
         if self.xy_data is None:
@@ -736,12 +783,12 @@ class VectorScopePlayer:
     def audio_callback(self, outdata, frames, time_info, status):
         """Sounddevice callback. Minimal work mode."""
         t0 = _time.perf_counter()
-        
+
         has_stats = hasattr(self, 'stats')
         if has_stats and self.stats['last_callback_end'] is not None:
             self.stats['wait_time'] += (t0 - self.stats['last_callback_end'])
             self.stats['wait_count'] += 1
-        
+
         def log_status(msg):
             if has_stats:
                 import time as _t
@@ -752,16 +799,19 @@ class VectorScopePlayer:
 
         with self._lock:
             self._fill_buffer(outdata, frames)
-            
+
             if has_stats:
                 self.stats['refresh_count'] += 1
-            
+
         self._apply_noise(outdata, frames)
-        
+
         # Zero spare channel
         if self.channels >= 4:
             outdata[:, 3] = 0.0
-            
+
+        # Push post-noise output to web (handles z-blanking alignment).
+        self._push_web_output(outdata, frames)
+
         self.global_sample += frames
 
         if has_stats:
@@ -778,23 +828,39 @@ class VectorScopePlayer:
         """Called when stream stops. Override for custom message."""
         print("\nStopped.")
 
+    def _start_background(self):
+        """Start background update tasks (e.g. game/clock loop).
+        Called by InteractiveSession after switching to this player.
+        Override in subclasses that need a continuous update loop."""
+        pass
+
+    def _stop_background(self):
+        """Stop background update tasks.
+        Called by InteractiveSession before switching away from this player.
+        Override in subclasses that started a background thread."""
+        pass
+
     def run(self):
         """Start the audio stream."""
         self._stream_start_time = _time.monotonic()
         self._last_status_time = 0.0
 
-        # Start web server if requested
-        if self._web_port is not None:
+        # Start web server if requested and not already provided (interactive mode)
+        if self._web_port is not None and self._web_server is None:
             from .web import VectorscopeWebServer
             self._web_server = VectorscopeWebServer(self._web_port)
             self._web_server.set_z_amp(self.z_amp)
             self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
-            # Send initial metadata
-            self._web_server.push_metadata({
+            # Send initial metadata — include web_channels directly so the JS
+            # uses the right stride from the very first frame.
+            meta = {
                 'command': self._command_name or type(self).__name__,
                 'channels': self.channels,
-            })
+            }
+            if self._web_data is not None:
+                meta['web_channels'] = self._web_data.shape[1] if self._web_data.ndim == 2 else 2
+            self._web_server.push_metadata(meta)
 
         # Use the standard optimized callback
         callback = self.audio_callback
@@ -819,17 +885,6 @@ class VectorScopePlayer:
         self._on_start()
         try:
             while True:
-                # Push data to web server from main thread
-                if self._web_server is not None:
-                    web_data_to_push = None
-                    with self._lock:
-                        if self._web_data is not None:
-                            web_data_to_push = self._web_data
-                            self._web_data = None # Push once per calculation
-                    
-                    if web_data_to_push is not None:
-                        self._web_server.push_frame(web_data_to_push)
-
                 # Periodically log performance stats
                 self._check_perf_log()
 
@@ -905,7 +960,7 @@ def add_common_args(parser, freq_default=100, rate_default=48000):
                         help="Period in seconds for writing performance stats to log")
 
 
-def common_args_from_parsed(args):
+def common_args_from_parsed(args, web_server=None):
     """Extract common arguments as a dict for passing to VectorScopePlayer."""
     return {
         'sample_rate': args.rate,
@@ -926,4 +981,5 @@ def common_args_from_parsed(args):
         'web_port': args.web_port if getattr(args, 'web', False) else None,
         'web_scale_factor': args.web_scale_factor,
         'perf_log_period': args.perf_log_period,
+        'web_server': web_server,
     }

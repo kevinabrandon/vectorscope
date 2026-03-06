@@ -1,5 +1,6 @@
 """Real-time oscilloscope clock display."""
 
+import threading
 from datetime import datetime
 
 from .base import VectorScopePlayer
@@ -35,7 +36,28 @@ class ClockPlayer(VectorScopePlayer):
             self.hf.load_default_font(font)
             self.hf.normalize_rendering(1.0)
 
+        # Background update thread (used in interactive mode)
+        self._update_stop_event = threading.Event()
+        self._update_thread = None
+
         self._update_time()
+
+    def _start_background(self):
+        """Start the clock update loop in a background thread."""
+        self._update_stop_event.clear()
+        def _loop():
+            while not self._update_stop_event.is_set():
+                self._update_time()
+                self._update_stop_event.wait(0.5)
+        self._update_thread = threading.Thread(target=_loop, daemon=True)
+        self._update_thread.start()
+
+    def _stop_background(self):
+        """Stop the background clock update loop."""
+        self._update_stop_event.set()
+        if self._update_thread is not None:
+            self._update_thread.join(timeout=2.0)
+            self._update_thread = None
 
     def _update_time(self):
         """Regenerate XY data if time changed."""
@@ -75,10 +97,10 @@ class ClockPlayer(VectorScopePlayer):
             self._web_server.set_z_amp(self.z_amp)
             self._web_server.set_web_scale_factor(self._web_scale_factor)
             self._web_server.start()
-            self._web_server.push_metadata({
-                'command': 'clock',
-                'channels': self.channels,
-            })
+            meta = {'command': 'clock', 'channels': self.channels}
+            if self._web_data is not None:
+                meta['web_channels'] = self._web_data.shape[1] if self._web_data.ndim == 2 else 2
+            self._web_server.push_metadata(meta)
 
         # Use standard optimized callback
         callback = self.audio_callback
@@ -101,32 +123,18 @@ class ClockPlayer(VectorScopePlayer):
             )
         stream.start()
         self._on_start()
+        self._start_background()
         try:
             while True:
-                # Update time if needed (once per minute)
-                self._update_time()
-
-                # Push data to web server from main thread
-                if self._web_server is not None:
-                    web_data_to_push = None
-                    with self._lock:
-                        if self._web_data is not None:
-                            web_data_to_push = self._web_data
-                            self._web_data = None
-                    
-                    if web_data_to_push is not None:
-                        self._web_server.push_frame(web_data_to_push)
-
-                # Periodically log performance stats
                 self._check_perf_log()
-
                 if self.device == 'demo':
-                    stream.sleep(100)
+                    stream.sleep(500)
                 else:
-                    sd.sleep(100)
+                    sd.sleep(500)
         except KeyboardInterrupt:
             pass
         finally:
+            self._stop_background()
             self.perf_log.close()
             stream.stop()
             stream.close()

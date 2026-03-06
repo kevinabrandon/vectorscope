@@ -304,7 +304,7 @@ def _build_parser():
     return parser, subs
 
 
-def _create_player(args):
+def _create_player(args, web_server=None):
     """Create and return a player instance from parsed args.
 
     Returns the player, or None if the command produced output
@@ -316,7 +316,7 @@ def _create_player(args):
             freq_min=args.freq_min,
             freq_max=args.freq_max,
             sweep_rate=args.sweep_rate,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'text':
@@ -339,7 +339,7 @@ def _create_player(args):
             font=args.font,
             curve_pts=args.curve_pts,
             pen_lift_samples=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'spiral':
@@ -348,7 +348,7 @@ def _create_player(args):
             arms=args.arms,
             turns=args.turns,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'clock':
@@ -358,7 +358,7 @@ def _create_player(args):
             font=args.font,
             penlift=args.penlift,
             curve_pts=args.curve_pts,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'ngon':
@@ -366,7 +366,7 @@ def _create_player(args):
         return NgonPlayer(
             sides=args.sides,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'fractal':
@@ -374,7 +374,7 @@ def _create_player(args):
         return FractalPlayer(
             fractal_type=args.type,
             iterations=args.iterations,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'platonic':
@@ -387,7 +387,7 @@ def _create_player(args):
             rz=args.rz,
             perspective=args.perspective,
             pen_lift=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'spirograph':
@@ -398,7 +398,7 @@ def _create_player(args):
             d=args.d,
             rot_freq=args.rot_freq,
             animate_d_range=args.animate_d,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'svg':
@@ -407,7 +407,7 @@ def _create_player(args):
             filepath=args.filepath,
             curve_pts=args.curve_pts,
             pen_lift_samples=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'asteroids':
@@ -429,7 +429,7 @@ def _create_player(args):
             saucer_bullet_speed=args.saucer_bullet_speed,
             saucer_bullet_ttl=args.saucer_bullet_ttl,
             saucer_max_bullets=args.saucer_max_bullets,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'sinc':
@@ -443,7 +443,7 @@ def _create_player(args):
             elevation=args.elevation,
             azimuth=args.azimuth,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'zcal':
@@ -453,7 +453,7 @@ def _create_player(args):
         from .zcal import ZCalPlayer
         return ZCalPlayer(
             mode=args.mode,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     return None
