@@ -171,6 +171,10 @@ class VectorScopePlayer:
         # Pre-calculated output buffers
         self._z_data = None
         self._web_data = None
+        # Snapshot set inside _fill_buffer (under lock) for use in _push_web_output
+        self._pending_web_snap = None
+        self._pending_web_start = 0
+        self._pending_xy_pre_noise = None  # pre-noise XY for z_enabled=True noise delta
         
         # Static metrics caching
         self._last_n_vectors = 0
@@ -703,33 +707,41 @@ class VectorScopePlayer:
     def _push_web_output(self, outdata, frames):
         """Push post-noise audio output to the web server.
 
-        Call this after _apply_noise.  Works for both static players (which
-        pre-compute _web_data once) and dynamic players (which set _web_data
-        each callback via _prepare_output).
-
-        Uses (position - frames) % n to reconstruct the start position that
-        _fill_buffer used, so the z-blanking column stays aligned with XY.
+        Call this after _apply_noise.  _fill_buffer (called under the player
+        lock) snapshots _web_data and the pre-fill position into
+        _pending_web_snap / _pending_web_start, so this method can read them
+        without re-acquiring the lock.  This guarantees the z column and XY
+        are always from the same _web_data frame even when a background thread
+        (e.g. the asteroids/clock update loop) replaces _web_data between
+        _fill_buffer and _push_web_output.
         """
         if self._web_server is None:
             return
-        with self._lock:
-            web_data_snap = self._web_data
-            data_len = len(self.xy_data) if self.xy_data is not None else 0
-            web_start = (self.position - frames) % data_len if data_len > 0 else 0
+        web_data_snap = self._pending_web_snap
+        web_start = self._pending_web_start
         if web_data_snap is not None and len(web_data_snap) > 0:
             n = len(web_data_snap)
             idx = (web_start + np.arange(frames)) % n
             if web_data_snap.shape[1] >= 3:
                 if self.z_enabled:
-                    # z_enabled=True: use un-delayed XY+Z from web_data_snap entirely.
-                    # outdata[:, :2] has delay-compensated XY for the physical scope;
-                    # the web player should not receive that delay.
-                    web_chunk = web_data_snap[idx]
+                    # z_enabled=True (3-channel physical scope): outdata[:,:2] is
+                    # delay-compensated for the scope hardware, which would misalign
+                    # with the un-delayed z column on the web.  Use web_data_snap
+                    # entirely (un-delayed XY+z) then add the noise delta so the
+                    # web sees un-delayed XY with the same noise as the scope.
+                    web_chunk = web_data_snap[idx].copy()
+                    pre_noise = self._pending_xy_pre_noise
+                    if pre_noise is not None:
+                        # noise_delta = noise applied by _apply_noise (additive types
+                        # are signal-independent so the delta transfers correctly).
+                        web_chunk[:, :2] += outdata[:, :2] - pre_noise
                 else:
-                    # z_enabled=False: use noisy XY from outdata + synthetic z blanking.
-                    # No delay in 2-channel mode, so outdata XY is correct.
+                    # z_enabled=False (2-channel): outdata[:,:2] is un-delayed and
+                    # carries noise applied by _apply_noise.  Combine with the
+                    # synthetic z column from the snapshot for correct blanking.
                     web_chunk = np.column_stack([outdata[:, :2], web_data_snap[idx, 2]])
             else:
+                # No z channel — just pass noisy XY through.
                 web_chunk = outdata[:, :2].copy()
         else:
             stride = min(self.channels, 3)
@@ -746,6 +758,12 @@ class VectorScopePlayer:
         xy_out = outdata[:, :2]
         z_out = outdata[:, 2] if self.z_enabled else None
 
+        # Snapshot web data and pre-fill position now (under lock, before advancing
+        # position) so _push_web_output gets XY-coherent z even if a background
+        # thread updates _web_data between _fill_buffer and _push_web_output.
+        self._pending_web_snap = self._web_data
+        self._pending_web_start = self.position % data_len
+
         # Determine indices for this block
         out_idx = 0
         self.position %= data_len
@@ -759,9 +777,14 @@ class VectorScopePlayer:
             xy_out[out_idx:out_idx + chunk_size] = self.xy_data[self.position:self.position + chunk_size]
             if z_out is not None and self._z_data is not None:
                 z_out[out_idx:out_idx + chunk_size] = self._z_data[self.position:self.position + chunk_size]
-            
+
             self.position = (self.position + chunk_size) % data_len
             out_idx += chunk_size
+
+        # For z_enabled=True, snapshot post-fill (pre-noise) XY so _push_web_output
+        # can compute the noise delta to apply to the un-delayed web XY.
+        if self.z_enabled:
+            self._pending_xy_pre_noise = outdata[:, :2].copy()
 
     def _check_status(self, status, log_func=None):
         """Log audio status, suppressing startup underruns and rate-limiting."""
