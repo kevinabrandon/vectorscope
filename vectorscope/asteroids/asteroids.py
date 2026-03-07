@@ -2,8 +2,11 @@
 # Headless Asteroids game logic adapted for vector rendering.
 #
 
+import logging
 import math
 import random
+
+_game_logger = logging.getLogger('vectorscope.game')
 
 from .badies import Debris, Rock, Saucer
 from .ship import Ship
@@ -122,17 +125,13 @@ class Asteroids:
                            ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
         }
         
-        # Game logging
-        self._game_log = open("vectorscope_asteroids.log", "a", encoding="utf-8")
         self._level_num = 1
         self.ship = None
         self.reset_attract()
 
-    def _log(self, category, msg):
-        import time as _t
-        ts = _t.strftime("%Y-%m-%d %H:%M:%S")
-        self._game_log.write(f"[{ts}] {category:8} {msg}\n")
-        self._game_log.flush()
+    def _log(self, category, msg, level=logging.INFO):
+        cat = category.strip('[]').lower()
+        _game_logger.log(level, msg, extra={'category': cat})
 
     def _log_score(self, increase, reason):
         self.score += increase

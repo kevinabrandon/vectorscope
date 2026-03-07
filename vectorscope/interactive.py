@@ -10,6 +10,7 @@ import sounddevice as sd
 
 from .cli import _create_player
 from .base import NullOutputStream
+from .logging_setup import setup_logging
 
 # Params that are stream-level or internal — not changeable mid-session.
 _HIDDEN_PARAMS = frozenset({
@@ -39,9 +40,8 @@ class InteractiveSession:
         self._perf_log_period = perf_log_period
         self._start_command = start_command
         self._web_server = None
-        
-        # Performance statistics
-        self.perf_log = open("vectorscope_perf.log", "a", encoding="utf-8")
+        setup_logging()
+
         self.stats = {
             'last_stats_print': _time.monotonic()
         }
@@ -132,7 +132,6 @@ class InteractiveSession:
         finally:
             if self.current_player is not None:
                 self.current_player._stop_background()
-            self.perf_log.close()
             stream.stop()
             stream.close()
             if self._web_server:

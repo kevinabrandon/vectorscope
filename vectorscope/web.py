@@ -9,10 +9,13 @@ on a single port.
 import base64
 import hashlib
 import json
+import logging
 import socket
 import struct
 import threading
 import time
+
+_web_logger = logging.getLogger('vectorscope.web')
 
 # ---------------------------------------------------------------------------
 # WebSocket helpers (RFC 6455, server-to-client only)
@@ -73,13 +76,8 @@ class VectorscopeWebServer:
         self._listen_sock = None
         self._running = False
         
-        # Web logging
-        self._log_file = open("vectorscope_web.log", "a", encoding="utf-8")
-
     def _log(self, msg):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._log_file.write(f"[{timestamp}] {msg}\n")
-        self._log_file.flush()
+        _web_logger.info(msg, extra={'category': 'web'})
 
     def start(self):
         """Launch accept loop + push loop in daemon threads."""
@@ -120,7 +118,6 @@ class VectorscopeWebServer:
                     pass
             self._clients.clear()
         self._log("Server stopped")
-        self._log_file.close()
 
     # ------------------------------------------------------------------
     # Accept loop — one thread per connection

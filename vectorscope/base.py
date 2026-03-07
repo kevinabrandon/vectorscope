@@ -2,8 +2,11 @@
 
 import argparse
 import ctypes
+import logging
 import threading
 import time as _time
+
+_perf_logger = logging.getLogger('vectorscope.perf')
 
 import numpy as np
 import sounddevice as sd
@@ -126,7 +129,6 @@ class VectorScopePlayer:
         self._lock = threading.Lock()
 
         # Performance statistics
-        self.perf_log = open("vectorscope_perf.log", "a", encoding="utf-8")
         self.stats = {
             'compute_time': 0.0,
             'compute_count': 0,
@@ -656,19 +658,19 @@ class VectorScopePlayer:
             bfps = self.sample_rate / s_avg if s_avg > 0 else 0
 
             cmd = self._command_name or type(self).__name__
-            ts = _time.strftime("%Y-%m-%d %H:%M:%S")
-            log_line = (f"[{ts}] {cmd:16} | dur: {dur:4.2f}s | lfps: {lfps:5.1f} | "
-                        f"bfps: {bfps:5.1f} | vcts: {int(v_avg):4} | plfts: {int(p_avg):3} | "
-                        f"smp: {int(s_avg):6} | cmp: {c_avg:5.2f}ms | cbk: {cb_avg:5.2f}ms | "
-                        f"wait: {w_avg:5.2f}ms\n")
-            self.perf_log.write(log_line)
-
-            if 'status_messages' in st:
-                for msg in st['status_messages']:
-                    self.perf_log.write(f"{msg}\n")
-                st['status_messages'] = []
-
-            self.perf_log.flush()
+            _perf_logger.info({
+                'type': 'perf',
+                'cmd': cmd,
+                'dur': round(dur, 3),
+                'lfps': round(lfps, 2),
+                'bfps': round(bfps, 2),
+                'vcts': int(v_avg),
+                'plfts': int(p_avg),
+                'smp': int(s_avg),
+                'cmp_ms': round(c_avg, 3),
+                'cbk_ms': round(cb_avg, 3),
+                'wait_ms': round(w_avg, 3),
+            })
 
             # Reset accumulators
             st['compute_time'] = st['callback_time'] = st['wait_time'] = st['vector_count'] = 0.0
@@ -816,10 +818,7 @@ class VectorScopePlayer:
             self.stats['wait_count'] += 1
 
         def log_status(msg):
-            if has_stats:
-                import time as _t
-                ts = _t.strftime("%Y-%m-%d %H:%M:%S")
-                self.stats.setdefault('status_messages', []).append(f"[{ts}] {msg}")
+            _perf_logger.warning({'type': 'status', 'msg': msg})
 
         self._check_status(status, log_func=log_status)
 
@@ -938,7 +937,6 @@ class VectorScopePlayer:
         finally:
             self._teardown_input()
             self._stop_background()
-            self.perf_log.close()
             stream.stop()
             stream.close()
             if self._web_server:

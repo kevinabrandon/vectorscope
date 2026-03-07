@@ -500,6 +500,9 @@ def _handle_config(args):
 
 def main():
     """Main CLI entry point with subcommands."""
+    from .logging_setup import setup_logging
+    setup_logging()
+
     parser, subparsers = _build_parser()
 
     config = load_config()

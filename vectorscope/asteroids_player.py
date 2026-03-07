@@ -5,6 +5,7 @@ import sys
 import termios
 import tty
 import select
+import logging
 import threading
 import numpy as np
 from HersheyFonts import HersheyFonts
@@ -345,10 +346,10 @@ class AsteroidsPlayer(VectorScopePlayer):
             ship.rotateLeft(step * 5)
         elif ch in ('s', 'S'): # Down / Fire?
             if ship.fireBullet():
-                self.game._log("[bullet]", "Player Ship fired bullet.")
+                self.game._log("[bullet]", "Player Ship fired bullet.", level=logging.DEBUG)
         elif ch == ' ':
             if ship.fireBullet():
-                self.game._log("[bullet]", "Player Ship fired bullet.")
+                self.game._log("[bullet]", "Player Ship fired bullet.", level=logging.DEBUG)
         elif ch in ('h', 'H'):
             ship.hyperspace_exit_pos = self.game.find_safe_position()
             ship.enterHyperSpace()
