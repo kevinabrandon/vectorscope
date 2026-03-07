@@ -175,6 +175,9 @@ class VectorScopePlayer:
         self._pending_web_snap = None
         self._pending_web_start = 0
         self._pending_xy_pre_noise = None  # pre-noise XY for z_enabled=True noise delta
+
+        # Subclasses can set this to request a fixed audio blocksize in run()
+        self._stream_blocksize = 0
         
         # Static metrics caching
         self._last_n_vectors = 0
@@ -853,14 +856,24 @@ class VectorScopePlayer:
 
     def _start_background(self):
         """Start background update tasks (e.g. game/clock loop).
-        Called by InteractiveSession after switching to this player.
+        Called by run() and by InteractiveSession after switching to this player.
         Override in subclasses that need a continuous update loop."""
         pass
 
     def _stop_background(self):
         """Stop background update tasks.
-        Called by InteractiveSession before switching away from this player.
+        Called by run() and by InteractiveSession before switching away.
         Override in subclasses that started a background thread."""
+        pass
+
+    def _setup_input(self):
+        """Set up keyboard/input handling before the main loop.
+        Override in subclasses that need to capture user input (e.g. games)."""
+        pass
+
+    def _teardown_input(self):
+        """Tear down keyboard/input handling after the main loop exits.
+        Override in subclasses that overrode _setup_input."""
         pass
 
     def run(self):
@@ -888,12 +901,14 @@ class VectorScopePlayer:
         # Use the standard optimized callback
         callback = self.audio_callback
 
+        extra = {'blocksize': self._stream_blocksize} if self._stream_blocksize else {}
         if self.device == 'demo':
             stream = NullOutputStream(
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',
                 callback=callback,
+                **extra,
             )
         else:
             stream = sd.OutputStream(
@@ -903,9 +918,12 @@ class VectorScopePlayer:
                 callback=callback,
                 device=self.device,
                 latency='high',
+                **extra,
             )
         stream.start()
         self._on_start()
+        self._setup_input()
+        self._start_background()
         try:
             while True:
                 # Periodically log performance stats
@@ -918,6 +936,8 @@ class VectorScopePlayer:
         except KeyboardInterrupt:
             pass
         finally:
+            self._teardown_input()
+            self._stop_background()
             self.perf_log.close()
             stream.stop()
             stream.close()

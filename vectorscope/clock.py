@@ -82,66 +82,6 @@ class ClockPlayer(VectorScopePlayer):
             self.position = 0
             print(f"  {time_str}")
 
-    def run(self):
-        """Start the audio stream, checking for time updates in main loop."""
-        import sounddevice as sd
-        import time
-        
-        self._stream_start_time = time.monotonic()
-        self._last_status_time = 0.0
-
-        # Start web server if requested
-        if self._web_port is not None:
-            from .web import VectorscopeWebServer
-            self._web_server = VectorscopeWebServer(self._web_port)
-            self._web_server.set_z_amp(self.z_amp)
-            self._web_server.set_web_scale_factor(self._web_scale_factor)
-            self._web_server.start()
-            meta = {'command': 'clock', 'channels': self.channels}
-            if self._web_data is not None:
-                meta['web_channels'] = self._web_data.shape[1] if self._web_data.ndim == 2 else 2
-            self._web_server.push_metadata(meta)
-
-        # Use standard optimized callback
-        callback = self.audio_callback
-
-        if self.device == 'demo':
-            stream = NullOutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype='float32',
-                callback=callback,
-            )
-        else:
-            stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype='float32',
-                callback=callback,
-                device=self.device,
-                latency='high',
-            )
-        stream.start()
-        self._on_start()
-        self._start_background()
-        try:
-            while True:
-                self._check_perf_log()
-                if self.device == 'demo':
-                    stream.sleep(500)
-                else:
-                    sd.sleep(500)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self._stop_background()
-            self.perf_log.close()
-            stream.stop()
-            stream.close()
-            if self._web_server:
-                self._web_server.stop()
-            self._on_stop()
-
     def _on_start(self):
         fmt = "24h" if self.use_24h else "12h"
         print(f"Clock ({fmt} format, font: {self.font_name})")

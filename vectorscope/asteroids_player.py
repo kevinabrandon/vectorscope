@@ -9,7 +9,7 @@ import threading
 import numpy as np
 from HersheyFonts import HersheyFonts
 
-from .base import VectorScopePlayer, NullOutputStream
+from .base import VectorScopePlayer
 from .polyline import polylines_to_xy
 from .asteroids.asteroids import Asteroids
 
@@ -168,6 +168,13 @@ class AsteroidsPlayer(VectorScopePlayer):
         self._update_stop_event = threading.Event()
         self._update_thread = None
 
+        # TTY state saved by _setup_input, restored by _teardown_input
+        self._tty_fd = None
+        self._tty_old_settings = None
+
+        # Request a fixed blocksize for consistent game timing
+        self._stream_blocksize = 2048
+
         # Initial frame
         self._update_frame()
 
@@ -261,105 +268,44 @@ class AsteroidsPlayer(VectorScopePlayer):
         print("  1 Easy, 2 Medium, 3 Hard")
         print("  ? for Help, Ctrl+C to quit")
 
-    def run(self):
-        """Override run to handle keyboard input."""
-        import sounddevice as sd
+    def _setup_input(self):
+        """Set up raw TTY and start the keyboard input thread."""
+        if not sys.stdin.isatty():
+            return
+        self._tty_fd = sys.stdin.fileno()
+        self._tty_old_settings = termios.tcgetattr(self._tty_fd)
+        tty.setraw(self._tty_fd)
 
-        self._stream_start_time = time.monotonic()
-        self._last_status_time = 0.0
+        def input_thread_func():
+            try:
+                while True:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if rlist:
+                        ch = sys.stdin.read(1)
+                        if ch == '\x03':  # Ctrl+C
+                            import os, signal
+                            os.kill(os.getpid(), signal.SIGINT)
+                            break
+                        if ch == '\x1b':
+                            ch2 = sys.stdin.read(1)
+                            if ch2 == '[':
+                                ch3 = sys.stdin.read(1)
+                                if ch3 == 'A': ch = 'w'
+                                elif ch3 == 'B': ch = 's'
+                                elif ch3 == 'C': ch = 'd'
+                                elif ch3 == 'D': ch = 'a'
+                        with self._lock:
+                            self._handle_input(ch)
+            except (EOFError, OSError):
+                pass
 
-        # Start web server if requested
-        if self._web_port is not None:
-            from .web import VectorscopeWebServer
-            self._web_server = VectorscopeWebServer(self._web_port)
-            self._web_server.set_z_amp(self.z_amp)
-            self._web_server.set_web_scale_factor(self._web_scale_factor)
-            self._web_server.start()
-            meta = {'command': 'asteroids', 'channels': self.channels}
-            if self._web_data is not None:
-                meta['web_channels'] = self._web_data.shape[1] if self._web_data.ndim == 2 else 2
-            self._web_server.push_metadata(meta)
+        threading.Thread(target=input_thread_func, daemon=True).start()
 
-        # Use the standard optimized callback
-        callback = self.audio_callback
-
-        if self.device == 'demo':
-            stream = NullOutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype='float32',
-                callback=callback,
-                blocksize=2048,
-            )
-        else:
-            stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype='float32',
-                callback=callback,
-                device=self.device,
-                latency='high',
-                blocksize=2048,
-            )
-        stream.start()
-        self._on_start()
-        
-        # Setup TTY for non-blocking input
-        if sys.stdin.isatty():
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            tty.setraw(fd)
-            
-            # Start asynchronous input thread
-            def input_thread_func():
-                try:
-                    while True:
-                        # We use a short select timeout so we can check if we should stop
-                        rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
-                        if rlist:
-                            ch = sys.stdin.read(1)
-                            if ch == '\x03': # Ctrl+C
-                                # Trigger stop
-                                import os
-                                import signal
-                                os.kill(os.getpid(), signal.SIGINT)
-                                break
-                            # Read full escape sequence
-                            if ch == '\x1b':
-                                ch2 = sys.stdin.read(1)
-                                if ch2 == '[':
-                                    ch3 = sys.stdin.read(1)
-                                    if ch3 == 'A': ch = 'w'
-                                    elif ch3 == 'B': ch = 's'
-                                    elif ch3 == 'C': ch = 'd'
-                                    elif ch3 == 'D': ch = 'a'
-                            
-                            with self._lock:
-                                self._handle_input(ch)
-                except (EOFError, OSError):
-                    pass
-            
-            threading.Thread(target=input_thread_func, daemon=True).start()
-        else:
-            old_settings = None
-
-        self._start_background()
-        try:
-            while True:
-                # Update loop runs in background thread; just log perf here
-                self._check_perf_log()
-                time.sleep(0.05)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self._stop_background()
-            if old_settings:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-            stream.stop()
-            stream.close()
-            if self._web_server:
-                self._web_server.stop()
-            self._on_stop()
+    def _teardown_input(self):
+        """Restore TTY to its original settings."""
+        if self._tty_old_settings is not None:
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._tty_old_settings)
+            self._tty_old_settings = None
 
     def _handle_input(self, ch):
         # Help toggle — works in any state
