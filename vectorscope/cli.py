@@ -187,6 +187,13 @@ def _build_parser():
                                   help="Aspect ratio (X scale)")
     asteroids_parser.add_argument("--penlift", type=int, default=20,
                                   help="Blanked samples between vectors")
+    asteroids_parser.add_argument("--seed", type=int, default=None,
+                                  help="RNG seed for deterministic gameplay (useful for benchmarking)")
+    asteroids_parser.add_argument("--bench-frames", type=int, default=None,
+                                  help="Run for N frames, print smp/bfps stats, then exit")
+    asteroids_parser.add_argument("--log-filter", type=str, default=None,
+                                  metavar="CATS",
+                                  help="Comma-separated log categories to emit: level,collision,spawn,bullet (default: all)")
     asteroids_parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default=None,
                                   help="Game difficulty preset (overridden by explicit args)")
     asteroids_parser.add_argument("--rocks", type=int, default=None,
@@ -205,11 +212,12 @@ def _build_parser():
                                   help="Saucer bullet time-to-live in frames (default: 60 large, 90 small)")
     asteroids_parser.add_argument("--saucer-max-bullets", type=int, default=None,
                                   help="Max simultaneous saucer bullets (default: 1)")
-    asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
-                                  help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
+    asteroids_parser.add_argument("--max-hop-speed", type=float, default=0.02,
+                                  help="Max beam speed during blanked hops (normalized units/sample). "
+                                       "Lower = slower hops, less ringing, more samples.")
     asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
                                   help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
-    add_common_args(asteroids_parser, freq_default=60, rate_default=192000)
+    add_common_args(asteroids_parser, rate_default=192000, include_freq=False)
     subs['asteroids'] = asteroids_parser
 
     # Sinc surface subcommand
@@ -255,6 +263,8 @@ def _build_parser():
         help='Interactive REPL: switch commands and tweak params live',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    interactive_parser.add_argument("start_command", nargs="?", default="circle",
+                                    help="Initial command to run (default: circle)")
     interactive_parser.add_argument("--rate", type=int, default=48000,
                                     help="Sample rate in Hz")
     interactive_parser.add_argument("--device", type=str, default=None,
@@ -267,6 +277,8 @@ def _build_parser():
                                     help="Port for web viewer")
     interactive_parser.add_argument("--web-scale-factor", type=float, default=1.0,
                                     help="Scale factor for the web viewer")
+    interactive_parser.add_argument("--perf-log-period", type=float, default=1.0,
+                                    help="Period in seconds for performance logging")
     interactive_parser.add_argument("--z-amp", type=float, default=1.0,
                                     help="Z output amplitude (0-1)")
     subs['interactive'] = interactive_parser
@@ -300,7 +312,7 @@ def _build_parser():
     return parser, subs
 
 
-def _create_player(args):
+def _create_player(args, web_server=None):
     """Create and return a player instance from parsed args.
 
     Returns the player, or None if the command produced output
@@ -312,7 +324,7 @@ def _create_player(args):
             freq_min=args.freq_min,
             freq_max=args.freq_max,
             sweep_rate=args.sweep_rate,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'text':
@@ -335,7 +347,7 @@ def _create_player(args):
             font=args.font,
             curve_pts=args.curve_pts,
             pen_lift_samples=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'spiral':
@@ -344,7 +356,7 @@ def _create_player(args):
             arms=args.arms,
             turns=args.turns,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'clock':
@@ -354,7 +366,7 @@ def _create_player(args):
             font=args.font,
             penlift=args.penlift,
             curve_pts=args.curve_pts,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'ngon':
@@ -362,7 +374,7 @@ def _create_player(args):
         return NgonPlayer(
             sides=args.sides,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'fractal':
@@ -370,7 +382,7 @@ def _create_player(args):
         return FractalPlayer(
             fractal_type=args.type,
             iterations=args.iterations,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'platonic':
@@ -383,7 +395,7 @@ def _create_player(args):
             rz=args.rz,
             perspective=args.perspective,
             pen_lift=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'spirograph':
@@ -394,7 +406,7 @@ def _create_player(args):
             d=args.d,
             rot_freq=args.rot_freq,
             animate_d_range=args.animate_d,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'svg':
@@ -403,7 +415,7 @@ def _create_player(args):
             filepath=args.filepath,
             curve_pts=args.curve_pts,
             pen_lift_samples=args.penlift,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'asteroids':
@@ -415,7 +427,9 @@ def _create_player(args):
             max_vectors=args.max_vectors,
             aspect_x=args.aspect,
             penlift=args.penlift,
-            dynamic_refresh=args.dynamic,
+            max_hop_speed=args.max_hop_speed,
+            seed=args.seed,
+            bench_frames=args.bench_frames,
             optimize_order=args.optimize,
             initial_rocks=args.rocks,
             friendly_fire=args.friendly_fire,
@@ -425,7 +439,7 @@ def _create_player(args):
             saucer_bullet_speed=args.saucer_bullet_speed,
             saucer_bullet_ttl=args.saucer_bullet_ttl,
             saucer_max_bullets=args.saucer_max_bullets,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'sinc':
@@ -439,7 +453,7 @@ def _create_player(args):
             elevation=args.elevation,
             azimuth=args.azimuth,
             rot_freq=args.rot_freq,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     elif args.command == 'zcal':
@@ -449,7 +463,7 @@ def _create_player(args):
         from .zcal import ZCalPlayer
         return ZCalPlayer(
             mode=args.mode,
-            **common_args_from_parsed(args)
+            **common_args_from_parsed(args, web_server=web_server)
         )
 
     return None
@@ -496,6 +510,8 @@ def _handle_config(args):
 
 def main():
     """Main CLI entry point with subcommands."""
+    from .logging_setup import setup_logging
+
     parser, subparsers = _build_parser()
 
     config = load_config()
@@ -511,6 +527,10 @@ def main():
         _handle_config(args)
         return
 
+    log_filter = getattr(args, 'log_filter', None)
+    log_cats = [c.strip() for c in log_filter.split(",")] if log_filter else None
+    setup_logging(log_categories=log_cats)
+
     # Print loaded config values so the user can see what's active
     if config:
         parts = [f"{k}={v}" for k, v in sorted(config.items())]
@@ -521,7 +541,9 @@ def main():
         web_port = args.web_port if getattr(args, 'web', False) else None
         session = InteractiveSession(parser, subparsers, args,
                                      web_port=web_port,
-                                     web_scale_factor=args.web_scale_factor)
+                                     web_scale_factor=args.web_scale_factor,
+                                     perf_log_period=args.perf_log_period,
+                                     start_command=args.start_command)
         session.run()
         return
 

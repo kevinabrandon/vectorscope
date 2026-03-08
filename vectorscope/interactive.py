@@ -2,11 +2,15 @@
 
 import readline  # noqa: F401 — enables up-arrow history for input()
 import shlex
+import sys
+import select
+import time as _time
 import numpy as np
 import sounddevice as sd
 
 from .cli import _create_player
 from .base import NullOutputStream
+from .logging_setup import setup_logging
 
 # Params that are stream-level or internal — not changeable mid-session.
 _HIDDEN_PARAMS = frozenset({
@@ -18,7 +22,9 @@ _HIDDEN_PARAMS = frozenset({
 class InteractiveSession:
     """Owns the audio stream and delegates to the current player."""
 
-    def __init__(self, parser, subparsers, args, web_port=None, web_scale_factor=1.0):
+    def __init__(self, parser, subparsers, args, web_port=None, 
+                 web_scale_factor=1.0, perf_log_period=1.0,
+                 start_command="circle"):
         self._parser = parser
         self._subparsers = subparsers  # dict: command name -> subparser
         self._sample_rate = args.rate
@@ -31,37 +37,32 @@ class InteractiveSession:
         self._current_command = None
         self._web_port = web_port
         self._web_scale_factor = web_scale_factor
+        self._perf_log_period = perf_log_period
+        self._start_command = start_command
         self._web_server = None
+        setup_logging()
+
+        self.stats = {
+            'last_stats_print': _time.monotonic()
+        }
 
     # ------------------------------------------------------------------
     # Audio
     # ------------------------------------------------------------------
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
         player = self.current_player
         if player is not None:
-            player._z_applied = False
-            player.audio_callback(outdata, frames, time, status)
-            # Auto-apply Z if the player's callback didn't
-            if player.z_enabled and not player._z_applied:
-                player._apply_z_channel(outdata, frames)
+            # Standard optimized callback handles fill, noise, and Z
+            player.audio_callback(outdata, frames, time_info, status)
+            
+            # If the player is a "static" one that doesn't implement its own 
+            # audio_callback logic to call _prepare_output, we must ensure 
+            # the web data is updated here.
+            if not player._z_applied:
+                player._prepare_output(player.xy_data, player.xy_blanking)
         else:
             outdata.fill(0)
-        if self._web_server is not None:
-            if player is not None:
-                pre_xy = getattr(player, '_pre_delay_xy', None)
-                xy = pre_xy if pre_xy is not None else outdata[:, :2]
-                if player._z_applied:
-                    pre_z = getattr(player, '_pre_delay_z', None)
-                    if pre_z is not None:
-                        web_data = np.column_stack([xy, pre_z])
-                    else:
-                        web_data = np.column_stack([xy, outdata[:, 2]])
-                else:
-                    web_data = xy.copy()
-            else:
-                web_data = outdata[:, :2].copy()
-            self._web_server.push_frame(web_data)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -98,18 +99,39 @@ class InteractiveSession:
         print(f"Commands: {', '.join(self._command_names)}")
         print("Type a command to start, 'help' for info, 'q' to exit.")
 
+        # Start with the requested command
+        self._switch_command([self._start_command])
+
         try:
             while True:
-                try:
-                    line = input("\n> ").strip()
-                except EOFError:
-                    break
-                if not line:
-                    continue
-                self._handle_input(line)
+                # Periodically log performance stats for the active player
+                player = self.current_player
+                if player is not None:
+                    # Temporary override of command name for interactive mode
+                    orig_cmd = player._command_name
+                    player._command_name = f"int({self._current_command})"
+                    player._check_perf_log()
+                    player._command_name = orig_cmd
+                    # Sync session's print timer with player's
+                    self.stats['last_stats_print'] = player.stats['last_stats_print']
+
+                # Non-blocking check for input
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rlist:
+                    try:
+                        line = sys.stdin.readline().strip()
+                    except EOFError:
+                        break
+                    if not line:
+                        print("> ", end="", flush=True)
+                        continue
+                    self._handle_input(line)
+                    print("> ", end="", flush=True)
         except KeyboardInterrupt:
             pass
         finally:
+            if self.current_player is not None:
+                self.current_player._stop_background()
             stream.stop()
             stream.close()
             if self._web_server:
@@ -153,16 +175,22 @@ class InteractiveSession:
         args.rate = self._sample_rate
         args.device = self._device
         args.channels = self._channels
+        args.z_amp = self._z_amp
+        args.web_scale_factor = self._web_scale_factor
+        args.perf_log_period = self._perf_log_period
         if not hasattr(args, 'z_blank'):
             args.z_blank = True
 
         # Drop to silence while building the new player — player creation
         # can be CPU-heavy (text rendering, fractals) and would starve
         # the audio callback thread via GIL contention.
+        old_player = self.current_player
         self.current_player = None
+        if old_player is not None:
+            old_player._stop_background()
 
         try:
-            player = _create_player(args)
+            player = _create_player(args, web_server=self._web_server)
         except Exception as e:
             print(f"Error: {e}")
             return
@@ -174,6 +202,7 @@ class InteractiveSession:
         self.current_args = args
         self._current_command = cmd
         player._on_start()
+        player._start_background()
         self._push_web_metadata()
         print()
         self._print_params()
@@ -240,16 +269,20 @@ class InteractiveSession:
         self.current_args.channels = self._channels
 
         # Silence during rebuild (see _switch_command comment)
+        old_player = self.current_player
         self.current_player = None
+        if old_player is not None:
+            old_player._stop_background()
 
         try:
-            player = _create_player(self.current_args)
+            player = _create_player(self.current_args, web_server=self._web_server)
         except Exception as e:
             print(f"Error: {e}")
             return
         if player is None:
             return
         self.current_player = player
+        player._start_background()
         self._push_web_metadata()
         self._print_params(only=set(changed))
 
@@ -361,11 +394,17 @@ class InteractiveSession:
                     params[key] = val
                 elif isinstance(val, list):
                     params[key] = val
-        self._web_server.push_metadata({
+        meta = {
             'command': self._current_command,
             'channels': self._channels,
             'params': params,
-        })
+        }
+        # Include web_channels directly from player's _web_data so the JS
+        # uses the right stride regardless of set_web_channels timing.
+        p = self.current_player
+        if p is not None and p._web_data is not None:
+            meta['web_channels'] = p._web_data.shape[1] if p._web_data.ndim == 2 else 2
+        self._web_server.push_metadata(meta)
 
     # ------------------------------------------------------------------
     # Display

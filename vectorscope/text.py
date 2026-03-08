@@ -134,14 +134,16 @@ class TextPlayer(VectorScopePlayer):
 
     def _update_text(self, text):
         """Regenerate XY data for new text."""
+        import time as _t
+        t0 = _t.perf_counter()
         self.text = text
         if self._is_hershey:
             from .hershey_player import build_xy_from_hershey
-            self.xy_data, self.xy_blanking, self.z_intensity = build_xy_from_hershey(
+            xy, blanking, intensity, n_lifts, n_samples = build_xy_from_hershey(
                 self.hf, text, self.samples, self.amp, self.pen_lift_samples
             )
         else:
-            self.xy_data, self.xy_blanking, self.z_intensity = build_xy_from_text(
+            xy, blanking, intensity, n_lifts, n_samples = build_xy_from_text(
                 text,
                 font_family=self.font,
                 curve_pts=self.curve_pts,
@@ -149,6 +151,10 @@ class TextPlayer(VectorScopePlayer):
                 pen_lift_samples=self.pen_lift_samples,
                 amp=self.amp
             )
+        self._prepare_output(xy, blanking, intensity)
+        self._increment_compute_stats(_t.perf_counter() - t0, 
+                                      len(xy) // 10, # rough vector estimate for text
+                                      n_lifts, n_samples)
         self.position = 0
 
     def _on_start(self):
@@ -168,9 +174,9 @@ def generate_wav(text, output, rate, freq, amp, font, curve_pts, penlift):
         hf = HersheyFonts()
         hf.load_default_font(font)
         hf.normalize_rendering(1.0)
-        xy, _blanking, _intensity = build_xy_from_hershey(hf, text, samples, amp, penlift)
+        xy, _blank, _inten, _lifts, _samps = build_xy_from_hershey(hf, text, samples, amp, penlift)
     else:
-        xy, _blanking, _intensity = build_xy_from_text(
+        xy, _blank, _inten, _lifts, _samps = build_xy_from_text(
             text,
             font_size=1.0,
             font_family=font,

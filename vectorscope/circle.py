@@ -23,8 +23,17 @@ class CirclePlayer(VectorScopePlayer):
         self.sweep_mode = freq_min is not None and freq_max is not None
         self._last_phase = 0
 
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, outdata, frames, time_info, status):
         """Generate circle in real-time with optional frequency sweep."""
+        import time as _time
+        t_start = _time.perf_counter()
+        t_compute_start = _time.perf_counter()
+        
+        has_stats = hasattr(self, 'stats')
+        if has_stats and self.stats['last_callback_end'] is not None:
+            self.stats['wait_time'] += (t_start - self.stats['last_callback_end'])
+            self.stats['wait_count'] += 1
+
         self._check_status(status)
 
         if self.sweep_mode:
@@ -39,11 +48,35 @@ class CirclePlayer(VectorScopePlayer):
 
         phase *= self.direction
 
-        outdata[:, 0] = np.sin(phase) * self.amp
-        outdata[:, 1] = np.cos(phase) * self.amp
+        xy = np.empty((frames, 2), dtype=np.float32)
+        xy[:, 0] = np.sin(phase) * self.amp
+        xy[:, 1] = np.cos(phase) * self.amp
+
+        # Prepare signals and swap buffers
+        self._prepare_output(xy)
+
+        # Attribute stats (circle is one continuous curve, so vectors=1)
+        effective_samples = int(self.sample_rate / abs(self.freq)) if self.freq != 0 else frames
+        self._increment_compute_stats(_time.perf_counter() - t_compute_start, 1, 0, effective_samples)
+
+        with self._lock:
+            self._fill_buffer(outdata, frames)
 
         self._apply_noise(outdata, frames)
+
+        # Zero spare channel
+        if self.channels >= 4:
+            outdata[:, 3] = 0.0
+
+        self._push_web_output(outdata, frames)
+
         self.global_sample += frames
+
+        if has_stats:
+            tend = _time.perf_counter()
+            self.stats['callback_time'] += (tend - t_start)
+            self.stats['callback_count'] += 1
+            self.stats['last_callback_end'] = tend
 
     def _on_start(self):
         if self.sweep_mode:

@@ -2,10 +2,13 @@
 # Headless Asteroids game logic adapted for vector rendering.
 #
 
+import logging
 import math
 import random
 
-from .badies import Debris, Rock, Saucer
+_game_logger = logging.getLogger('vectorscope.game')
+
+from .badies import Debris, LineDebris, Rock, Saucer
 from .ship import Ship
 from .soundManager import playSound, playSoundContinuous, stopSound
 from .stage import Stage
@@ -42,12 +45,16 @@ class VectorRenderer:
             if color[0] <= 0 and color[1] <= 0 and color[2] <= 0:
                 return
         
-        # High-intensity for small/fast objects, standard for others
+        # Per-type intensity for Z-channel brightness control
         from .util.vectorsprites import Point
-        if isinstance(sprite, Point) or sprite.__class__.__name__ == 'ThrustJet':
-            intensity = 1.0
+        if isinstance(sprite, Point) or sprite.__class__.__name__ == 'ThrustJet' or getattr(sprite, 'high_intensity', False):
+            intensity = 1.0   # bullets, thrust, explosions, ship debris
+        elif isinstance(sprite, Ship):
+            intensity = 0.75  # player ship
+        elif isinstance(sprite, Saucer):
+            intensity = 0.66  # saucer
         else:
-            intensity = 0.5
+            intensity = 0.5   # rocks
 
         def draw_once():
             x0, y0 = self._map(points[0][0], points[0][1])
@@ -82,6 +89,8 @@ class Asteroids:
         self.maxc = float(maxc)
         self.aspect_x = float(aspect_x)
         self._rng = random.Random(seed)
+        if seed is not None:
+            random.seed(seed)  # seed global random used by sprite constructors
         # Store CLI overrides — these layer on top of difficulty presets
         self._cli_overrides = {}
         if friendly_fire:
@@ -109,7 +118,7 @@ class Asteroids:
         self._time = 0.0
         self.initial_rocks = num_rocks
         self.rock_speed = 1.0
-        self.current_difficulty = 'medium'
+        self.current_difficulty = 'hard'
         self.difficulty_presets = {
             'easy':   dict(rocks=1, lives=5, friendly_fire=False, rock_speed=0.8,
                            saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
@@ -121,25 +130,61 @@ class Asteroids:
                            saucer_bullet_speed=15, saucer_bullet_ttl=120, saucer_max_bullets=3,
                            ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None),
         }
+        
+        self._level_num = 1
+        self.ship = None
+        self._hyperspace_enter_pos = None
         self.reset_attract()
+
+    def _state_str(self):
+        """Compact snapshot of all game objects for log prefixes."""
+        mode = "attract" if self.attract_mode else self.current_difficulty
+        sau_l = 1 if (self.saucer is not None and self.saucer.saucerType == Saucer.largeSaucerType) else 0
+        sau_s = 1 if (self.saucer is not None and self.saucer.saucerType == Saucer.smallSaucerType) else 0
+        l, m, s = self._get_rock_counts()
+        deb = sum(1 for sp in self.stage.spriteList if isinstance(sp, (Debris, LineDebris)))
+        bul_s  = len(self.ship.bullets) if self.ship else 0
+        bul_ls = len(self.saucer.bullets) if (self.saucer and self.saucer.saucerType == Saucer.largeSaucerType) else 0
+        bul_ss = len(self.saucer.bullets) if (self.saucer and self.saucer.saucerType == Saucer.smallSaucerType) else 0
+        return (f"{mode} L{self._level_num}({self.numRocks}) "
+                f"sc={self.score:06d} lives={self.lives} "
+                f"sau={sau_l}L/{sau_s}S "
+                f"rocks={l}L/{m}M/{s}S deb={deb} "
+                f"bullets={bul_s}S/{bul_ls}LS/{bul_ss}SS")
+
+    def _log(self, category, msg, level=logging.INFO):
+        cat = category.strip('[]').lower()
+        _game_logger.log(level, f"{self._state_str()} | {msg}", extra={'category': cat})
+
+    def _add_score(self, n):
+        self.score += n
+
+    def _get_rock_counts(self):
+        l, m, s = 0, 0, 0
+        for r in self.rockList:
+            if r.rockType == Rock.largeRockType: l += 1
+            elif r.rockType == Rock.mediumRockType: m += 1
+            elif r.rockType == Rock.smallRockType: s += 1
+        return l, m, s
 
     def reset_attract(self):
         self.stage.clear()
         self.gameState = "playing"
         self.score = 0
-        self.lives = 0
-        self.livesList = []
+        self.lives = 3
         self.rockList = []
-        self.numRocks = self.initial_rocks
+        p = self.difficulty_presets[self.current_difficulty]
+        self.numRocks = p['rocks']
+        self._level_num = 1
         self.nextLife = 10000
         self.saucer = None
         self._orphaned_bullets = []
-        self._saucer_spawn_timer = self._rng.uniform(4.0, 7.0)
+        self._saucer_spawn_timer = self._rng.uniform(6.0, 12.0)
         self.explodingCount = 0.0
-        self.ship = None
+        self.createNewShip(reason="initial")
         self.createRocks(self.numRocks)
-        self.createNewShip()
         self._reset_ai()
+        self._log("[level]", f"level-start: L{self._level_num} +{self.numRocks}rocks")
 
     def start_game(self, difficulty):
         """Start a new game with the given difficulty preset, then apply CLI overrides."""
@@ -160,14 +205,13 @@ class Asteroids:
         self.show_help = False
         self.reset_attract()
         self.lives = p['lives']
-        self.createNewShip()
 
     def continue_game(self):
         """Continue after game over, keeping score and rocks."""
         p = self.difficulty_presets[self.current_difficulty]
         self.lives = p['lives']
         self.gameState = "playing"
-        self.createNewShip()
+        self.createNewShip(reason="continue")
 
     def _reset_ai(self):
         self._ai_turn_timer = 0.0
@@ -193,7 +237,7 @@ class Asteroids:
                 best_x, best_y, best_dist = x, y, min_dist
         return best_x, best_y
 
-    def createNewShip(self):
+    def createNewShip(self, reason="initial"):
         if self.ship:
             for debris in list(self.ship.shipDebrisList):
                 self.stage.removeSprite(debris)
@@ -206,6 +250,18 @@ class Asteroids:
         self.ship.position.y = safe_y
         self.ship.thrustJet.position.x = safe_x
         self.ship.thrustJet.position.y = safe_y
+
+        # Point ship toward center, snapped to nearest 30-degree step.
+        # Thrust direction at angle α is (-sin α, -cos α); to face center:
+        #   sin α = (safe_x - cx) / dist,  cos α = (safe_y - cy) / dist
+        cx, cy = self.maxc / 2, self.maxc / 2
+        dx, dy = safe_x - cx, safe_y - cy
+        if dx != 0 or dy != 0:
+            raw_deg = math.degrees(math.atan2(dx, dy))
+            snap = 30
+            snapped = round(raw_deg / snap) * snap
+            self.ship.angle = snapped
+            self.ship.thrustJet.angle = snapped
         if self.ship_bullet_speed is not None:
             self.ship.bulletVelocity = self.ship_bullet_speed
         if self.ship_bullet_ttl is not None:
@@ -214,6 +270,9 @@ class Asteroids:
             self.ship.maxBullets = self.ship_max_bullets
         self.stage.addSprite(self.ship.thrustJet)
         self.stage.addSprite(self.ship)
+        self._hyperspace_enter_pos = None
+        if reason != "initial":
+            self._log("[spawn]", f"ship ({reason}): pos=({safe_x:.0f},{safe_y:.0f}) angle={self.ship.angle:.0f}")
 
     def _apply_rock_speed(self, rock):
         rock.heading.x *= self.rock_speed
@@ -235,8 +294,10 @@ class Asteroids:
             self.rockList.append(newRock)
 
     def levelUp(self):
+        self._level_num += 1
         self.numRocks += 1
         self.createRocks(self.numRocks)
+        self._log("[level]", f"level-up: now L{self._level_num} +{self.numRocks}rocks")
 
     def attractControl(self, dt):
         if not self.ship:
@@ -264,11 +325,14 @@ class Asteroids:
         self._ai_fire_timer -= dt
         if self._ai_fire_timer <= 0.0:
             self._ai_fire_timer = self._rng.uniform(0.2, 0.6)
-            self.ship.fireBullet()
+            if self.ship.fireBullet():
+                self._log("[bullet]", "ship-fired")
 
     def doSaucerLogic(self, dt):
         if self.saucer is not None and self.saucer.laps >= 2:
+            size = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
             self.killSaucer()
+            self._log("[collision]", f"{size}-saucer: max-laps")
 
         if self.saucer is None:
             self._saucer_spawn_timer -= dt
@@ -284,6 +348,8 @@ class Asteroids:
                     self.saucer.maxBullets = self.saucer_max_bullets
                 self.stage.addSprite(self.saucer)
                 self._saucer_spawn_timer = self._rng.uniform(6.0, 12.0)
+                size = "big" if saucer_type == Saucer.largeSaucerType else "small"
+                self._log("[spawn]", f"{size}-saucer: from={self.saucer.side} pos=({self.saucer.position.x:.0f},{self.saucer.position.y:.0f})")
 
     def exploding(self, dt):
         self.explodingCount += dt * 60.0
@@ -292,191 +358,268 @@ class Asteroids:
                 self.stage.removeSprite(debris)
             self.ship.shipDebrisList = []
 
-            if self.attract_mode:
-                self.gameState = "playing"
-                self.createNewShip()
-                self.lives = 1
-            else:
-                if self.lives <= 0:
+            if self.lives <= 0:
+                if self.attract_mode:
+                    self.reset_attract()
+                else:
                     self.gameState = "gameover"
                     self.ship = None
-                else:
-                    self.gameState = "playing"
-                    self.createNewShip()
+            else:
+                self.gameState = "playing"
+                self.createNewShip(reason="respawn")
 
     def checkCollisions(self):
         if not self.ship:
             return
-        shipHit, saucerHit = False, False
 
+        _SIZE  = {Rock.largeRockType: "big",  Rock.mediumRockType: "med",  Rock.smallRockType: "small"}
+        _PTS   = {Rock.largeRockType: 50,     Rock.mediumRockType: 100,    Rock.smallRockType: 200}
+        _CHILD = {Rock.largeRockType: (Rock.mediumRockType, "med"),
+                  Rock.mediumRockType: (Rock.smallRockType, "small")}
+        _ROCK_DEB = {Rock.largeRockType: 6, Rock.mediumRockType: 6, Rock.smallRockType: 4}
+
+        shipHit = False
+        ship_event = None  # deferred: formatted after killShip() so lives count is correct
+
+        # --- Ship bullet → saucer (checked before rock loop) ---
+        if self.saucer is not None and self.ship.bulletCollision(self.saucer):
+            score = self.saucer.scoreValue
+            size  = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
+            self._add_score(score)
+            self.createDebris(self.saucer)
+            self.killSaucer()
+            self._log("[collision]", f"ship-bullet → {size}-saucer: +{score}pts +6saucer-debris")
+
+        # --- Rock collisions ---
         for rock in list(self.rockList):
-            rockHit = False
+            # Detect all sources; ship-bullet takes display priority
+            ship_bullet   = self.ship.bulletCollision(rock)
+            saucer_bullet = self.saucer is not None and self.saucer.bulletCollision(rock)
+            ship_rock     = (not self.ship.inHyperSpace and
+                             rock.collidesWith(self.ship) and
+                             rock.checkPolygonCollision(self.ship) is not None)
+            saucer_rock   = self.saucer is not None and rock.collidesWith(self.saucer)
 
-            if not self.ship.inHyperSpace and rock.collidesWith(self.ship):
-                p = rock.checkPolygonCollision(self.ship)
-                if p is not None:
-                    shipHit = True
-                    rockHit = True
+            if not (ship_bullet or saucer_bullet or ship_rock or saucer_rock):
+                continue
 
-            if self.saucer is not None:
-                if rock.collidesWith(self.saucer):
-                    saucerHit = True
-                    rockHit = True
+            if ship_rock and not shipHit:
+                shipHit = True
 
-                if self.saucer.bulletCollision(rock):
-                    rockHit = True
+            self.rockList.remove(rock)
+            self.stage.removeSprite(rock)
 
-                if self.ship.bulletCollision(self.saucer):
-                    saucerHit = True
-                    self.score += self.saucer.scoreValue
+            old_size = _SIZE[rock.rockType]
+            pts = _PTS[rock.rockType] if (ship_bullet or ship_rock) else 0
+            if pts:
+                self._add_score(pts)
 
-            if self.ship.bulletCollision(rock):
-                rockHit = True
+            if rock.rockType == Rock.largeRockType:   playSound("explode1")
+            elif rock.rockType == Rock.mediumRockType: playSound("explode2")
+            else:                                      playSound("explode3")
 
-            if rockHit:
-                self.rockList.remove(rock)
-                self.stage.removeSprite(rock)
+            created, child_name = 0, ""
+            if rock.rockType in _CHILD:
+                new_rock_type, child_name = _CHILD[rock.rockType]
+                created = 2
+                for _ in range(2):
+                    pos = Vector2d(rock.position.x, rock.position.y)
+                    newRock = Rock(self.stage, pos, new_rock_type)
+                    self._apply_rock_speed(newRock)
+                    self.stage.addSprite(newRock)
+                    self.rockList.append(newRock)
 
-                if rock.rockType == Rock.largeRockType:
-                    playSound("explode1")
-                    newRockType = Rock.mediumRockType
-                    self.score += 50
-                elif rock.rockType == Rock.mediumRockType:
-                    playSound("explode2")
-                    newRockType = Rock.smallRockType
-                    self.score += 100
-                else:
-                    playSound("explode3")
-                    self.score += 200
+            self.createDebris(rock)
 
-                if rock.rockType != Rock.smallRockType:
-                    for _ in range(0, 2):
-                        position = Vector2d(rock.position.x, rock.position.y)
-                        newRock = Rock(self.stage, position, newRockType)
-                        self._apply_rock_speed(newRock)
-                        self.stage.addSprite(newRock)
-                        self.rockList.append(newRock)
+            # Build effects list (ship-killed deferred until after killShip)
+            effects = []
+            if pts:            effects.append(f"+{pts}pts")
+            if created:        effects.append(f"+{created}{child_name}")
+            effects.append(f"+{_ROCK_DEB[rock.rockType]}rock-debris")
 
-                self.createDebris(rock)
-
-        if self.saucer is not None:
-            if not self.ship.inHyperSpace:
-                if self.saucer.bulletCollision(self.ship):
-                    shipHit = True
-
-                if self.saucer.collidesWith(self.ship):
-                    shipHit = True
-                    saucerHit = True
-
-            if saucerHit:
+            # Rock also destroys saucer?
+            if saucer_rock and self.saucer is not None:
+                saucer_size = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
                 self.createDebris(self.saucer)
                 self.killSaucer()
+                effects.append(f"+6saucer-debris")
 
-        # Check orphaned saucer bullets (saucer dead, bullets still in flight)
+            # Determine aggressor → target
+            if ship_bullet:
+                self._log("[collision]", f"ship-bullet → {old_size}-rock: {' '.join(effects)}")
+            elif saucer_bullet:
+                self._log("[collision]", f"saucer-bullet → {old_size}-rock: {' '.join(effects)}")
+            elif ship_rock:
+                # Defer: need lives-left from after killShip()
+                ship_event = f"ship ↔ {old_size}-rock: {{ship_killed}} {' '.join(effects)}"
+            else:  # saucer_rock only
+                self._log("[collision]", f"{old_size}-rock ↔ {saucer_size}-saucer: {' '.join(effects)}")
+
+        # --- Saucer vs ship ---
+        if self.saucer is not None and not self.ship.inHyperSpace:
+            saucer_bullet_hit = self.saucer.bulletCollision(self.ship)
+            saucer_body_hit   = self.saucer.collidesWith(self.ship)
+
+            if saucer_bullet_hit and not shipHit:
+                shipHit = True
+                ship_event = "saucer-bullet → ship: {ship_killed}"
+
+            if saucer_body_hit:
+                saucer_size = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
+                self.createDebris(self.saucer)
+                self.killSaucer()
+                if not shipHit:
+                    shipHit = True
+                ship_event = f"ship ↔ {saucer_size}-saucer: {{ship_killed}} +6saucer-debris"
+
+        # --- Orphaned saucer bullets ---
         for bullet in list(self._orphaned_bullets):
             if bullet.ttl <= 0:
                 self._orphaned_bullets.remove(bullet)
                 continue
-            # Orphaned bullets can still hit rocks
             for rock in list(self.rockList):
                 if rock.collidesWith(bullet):
                     bullet.ttl = 0
                     self._orphaned_bullets.remove(bullet)
                     self.rockList.remove(rock)
                     self.stage.removeSprite(rock)
-                    if rock.rockType == Rock.largeRockType:
-                        playSound("explode1")
-                        newRockType = Rock.mediumRockType
-                    elif rock.rockType == Rock.mediumRockType:
-                        playSound("explode2")
-                        newRockType = Rock.smallRockType
-                    else:
-                        playSound("explode3")
-                    if rock.rockType != Rock.smallRockType:
+                    old_size = _SIZE[rock.rockType]
+                    if rock.rockType == Rock.largeRockType:   playSound("explode1")
+                    elif rock.rockType == Rock.mediumRockType: playSound("explode2")
+                    else:                                      playSound("explode3")
+                    created, child_name = 0, ""
+                    if rock.rockType in _CHILD:
+                        new_rock_type, child_name = _CHILD[rock.rockType]
+                        created = 2
                         for _ in range(2):
-                            position = Vector2d(rock.position.x, rock.position.y)
-                            newRock = Rock(self.stage, position, newRockType)
+                            pos = Vector2d(rock.position.x, rock.position.y)
+                            newRock = Rock(self.stage, pos, new_rock_type)
                             self._apply_rock_speed(newRock)
                             self.stage.addSprite(newRock)
                             self.rockList.append(newRock)
                     self.createDebris(rock)
+                    effects = []
+                    if created: effects.append(f"+{created}{child_name}")
+                    effects.append(f"+{_ROCK_DEB[rock.rockType]}rock-debris")
+                    self._log("[collision]", f"orphaned-saucer-bullet → {old_size}-rock: {' '.join(effects)}")
                     break
-            # Orphaned bullets can still hit the ship
             if not shipHit and not self.ship.inHyperSpace:
                 if bullet in self._orphaned_bullets and self.ship.collidesWith(bullet):
                     shipHit = True
                     bullet.ttl = 0
                     self._orphaned_bullets.remove(bullet)
+                    ship_event = "orphaned-saucer-bullet → ship: {ship_killed}"
 
+        # --- Friendly fire ---
         if not shipHit and self.friendly_fire and not self.ship.inHyperSpace:
             for bullet in self.ship.bullets:
                 if bullet.ttl > 0 and bullet.ttl < 80 and self.ship.collidesWith(bullet):
                     shipHit = True
                     bullet.ttl = 0
+                    ship_event = "friendly-fire → ship: {ship_killed}"
                     break
 
+        # --- Resolve ship kill (deferred so lives count is accurate) ---
         if shipHit:
             self.killShip()
+            if ship_event:
+                killed_str = "-1life +6ship-debris"
+                self._log("[collision]", ship_event.format(ship_killed=killed_str))
 
     def checkPostDeathCollisions(self):
         """Check ship's in-flight bullets against rocks/saucers while ship is dead."""
         if not self.ship:
             return
+
+        _SIZE     = {Rock.largeRockType: "big",  Rock.mediumRockType: "med",  Rock.smallRockType: "small"}
+        _PTS      = {Rock.largeRockType: 50,     Rock.mediumRockType: 100,    Rock.smallRockType: 200}
+        _CHILD    = {Rock.largeRockType: (Rock.mediumRockType, "med"),
+                     Rock.mediumRockType: (Rock.smallRockType, "small")}
+        _ROCK_DEB = {Rock.largeRockType: 6, Rock.mediumRockType: 6, Rock.smallRockType: 4}
+
         for rock in list(self.rockList):
             if self.ship.bulletCollision(rock):
                 self.rockList.remove(rock)
                 self.stage.removeSprite(rock)
-                if rock.rockType == Rock.largeRockType:
-                    playSound("explode1")
-                    newRockType = Rock.mediumRockType
-                    self.score += 50
-                elif rock.rockType == Rock.mediumRockType:
-                    playSound("explode2")
-                    newRockType = Rock.smallRockType
-                    self.score += 100
-                else:
-                    playSound("explode3")
-                    self.score += 200
-                if rock.rockType != Rock.smallRockType:
+
+                old_size = _SIZE[rock.rockType]
+                pts = _PTS[rock.rockType]
+                self._add_score(pts)
+
+                if rock.rockType == Rock.largeRockType:   playSound("explode1")
+                elif rock.rockType == Rock.mediumRockType: playSound("explode2")
+                else:                                      playSound("explode3")
+
+                created, child_name = 0, ""
+                if rock.rockType in _CHILD:
+                    new_rock_type, child_name = _CHILD[rock.rockType]
+                    created = 2
                     for _ in range(2):
-                        position = Vector2d(rock.position.x, rock.position.y)
-                        newRock = Rock(self.stage, position, newRockType)
+                        pos = Vector2d(rock.position.x, rock.position.y)
+                        newRock = Rock(self.stage, pos, new_rock_type)
                         self._apply_rock_speed(newRock)
                         self.stage.addSprite(newRock)
                         self.rockList.append(newRock)
+
                 self.createDebris(rock)
+
+                effects = [f"+{pts}pts"]
+                if created: effects.append(f"+{created}{child_name}")
+                effects.append(f"+{_ROCK_DEB[rock.rockType]}rock-debris")
+                self._log("[collision]", f"[post-death] ship-bullet → {old_size}-rock: {' '.join(effects)}")
+
         if self.saucer is not None:
             if self.ship.bulletCollision(self.saucer):
-                self.score += self.saucer.scoreValue
+                score = self.saucer.scoreValue
+                size  = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
+                self._add_score(score)
                 self.createDebris(self.saucer)
                 self.killSaucer()
+                self._log("[collision]", f"[post-death] ship-bullet → {size}-saucer: +{score}pts +6saucer-debris")
 
     def killShip(self):
         stopSound("thrust")
         playSound("explode2")
         self.explodingCount = 0.0
-        if not self.attract_mode:
-            self.lives -= 1
+        self.lives -= 1
         self.stage.removeSprite(self.ship)
         self.stage.removeSprite(self.ship.thrustJet)
         self.gameState = "exploding"
         self.ship.explode()
+        self._spawn_debris(Vector2d(self.ship.position.x, self.ship.position.y),
+                           Debris, 6, velocity=4.0, ttl=80)
 
     def killSaucer(self):
         stopSound("lsaucer")
         stopSound("ssaucer")
         playSound("explode2")
+        if self.saucer.saucerType == Saucer.largeSaucerType:
+            self._spawn_debris(Vector2d(self.saucer.position.x, self.saucer.position.y),
+                               Debris, 6, velocity=4.0, ttl=80)
+        else:
+            self._spawn_debris(Vector2d(self.saucer.position.x, self.saucer.position.y),
+                               Debris, 6, velocity=3.0, ttl=60)
         self.stage.removeSprite(self.saucer)
         # Keep any in-flight bullets so they can still hit the player
         for bullet in self.saucer.bullets:
             self._orphaned_bullets.append(bullet)
         self.saucer = None
 
+    def _spawn_debris(self, position, cls, count, velocity, ttl):
+        for _ in range(count):
+            self.stage.addSprite(cls(Vector2d(position.x, position.y), self.stage,
+                                     velocity=velocity, ttl=ttl))
+
     def createDebris(self, sprite):
-        for _ in range(0, 25):
-            position = Vector2d(sprite.position.x, sprite.position.y)
-            debris = Debris(position, self.stage)
-            self.stage.addSprite(debris)
+        position = Vector2d(sprite.position.x, sprite.position.y)
+        rock_type = getattr(sprite, 'rockType', None)
+        if rock_type == Rock.largeRockType:
+            self._spawn_debris(position, Debris, 6, velocity=4.0, ttl=80)
+        elif rock_type == Rock.mediumRockType:
+            self._spawn_debris(position, Debris, 6, velocity=3.0, ttl=60)
+        else:
+            # Small rock
+            self._spawn_debris(position, LineDebris, 4, velocity=2.0, ttl=40)
 
     def checkScore(self):
         if self.attract_mode:
@@ -485,6 +628,7 @@ class Asteroids:
             playSound("extralife")
             self.nextLife += 10000
             self.lives += 1
+            self._log("[level]", f"extra-life: lives={self.lives} next-at={self.nextLife}")
 
     def step(self, dt, builder, max_vectors):
         if dt < 0:
@@ -493,10 +637,25 @@ class Asteroids:
             dt = 0.2
         self._time += dt
 
+        ship_in_hyperspace = self.ship is not None and self.ship.inHyperSpace
+        saucer_shots_before = self.saucer.shots_fired if self.saucer else 0
+
         self.stage.moveSprites(dt)
+
+        # Saucer bullet detection (fires inside moveSprites)
+        if self.saucer and self.saucer.shots_fired > saucer_shots_before:
+            size = "big" if self.saucer.saucerType == Saucer.largeSaucerType else "small"
+            self._log("[bullet]", f"{size}-saucer-fired")
 
         renderer = VectorRenderer(builder, self.maxc, self.aspect_x, max_vectors)
         self.stage.drawSprites(renderer.draw_poly)
+
+        # Hyperspace exit detection: inHyperSpace is cleared inside draw(), so check after drawSprites()
+        if ship_in_hyperspace and self.ship is not None and not self.ship.inHyperSpace:
+            from_str = (f"({self._hyperspace_enter_pos[0]:.0f},{self._hyperspace_enter_pos[1]:.0f})"
+                        if self._hyperspace_enter_pos else "?")
+            self._log("[spawn]", f"ship-hyperspace: from={from_str} to=({self.ship.position.x:.0f},{self.ship.position.y:.0f})")
+            self._hyperspace_enter_pos = None
 
         self.doSaucerLogic(dt)
         self.checkScore()
@@ -521,10 +680,9 @@ class Asteroids:
         score_str = f"{self.score:06d}"
         builder.text_at(map_x(80), int(self.maxc - 120), score_str, size=4.5, rot=0, intensity=0.5)
 
-        if not self.attract_mode:
-            lives_str = f"{max(0, self.lives)}"
-            # Top right
-            builder.text_at(map_x(self.maxc - 150), int(self.maxc - 120), lives_str, size=4.5, rot=0, intensity=0.5)
+        lives_str = f"{max(0, self.lives)}"
+        # Top right
+        builder.text_at(map_x(self.maxc - 150), int(self.maxc - 120), lives_str, size=4.5, rot=0, intensity=0.5)
 
         center_x = self.maxc * 0.5
 

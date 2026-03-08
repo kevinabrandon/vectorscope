@@ -9,10 +9,13 @@ on a single port.
 import base64
 import hashlib
 import json
+import logging
 import socket
 import struct
 import threading
 import time
+
+_web_logger = logging.getLogger('vectorscope.web')
 
 # ---------------------------------------------------------------------------
 # WebSocket helpers (RFC 6455, server-to-client only)
@@ -72,6 +75,9 @@ class VectorscopeWebServer:
         self._lock = threading.Lock()
         self._listen_sock = None
         self._running = False
+        
+    def _log(self, msg):
+        _web_logger.info(msg, extra={'category': 'web'})
 
     def start(self):
         """Launch accept loop + push loop in daemon threads."""
@@ -93,6 +99,8 @@ class VectorscopeWebServer:
         threading.Thread(target=self._push_loop, daemon=True).start()
 
         print(f"Web viewer: http://localhost:{self._port}/")
+        self._log(f"Server started on port {self._port}")
+        self._log(f"Local access: http://localhost:{self._port}/")
 
     def stop(self):
         """Shutdown server and close client sockets."""
@@ -109,6 +117,7 @@ class VectorscopeWebServer:
                 except OSError:
                     pass
             self._clients.clear()
+        self._log("Server stopped")
 
     # ------------------------------------------------------------------
     # Accept loop — one thread per connection
@@ -176,7 +185,7 @@ class VectorscopeWebServer:
         client_key = headers.get("sec-websocket-key", "").strip()
         accept = _ws_accept_key(client_key)
 
-        print(f"[web] WS connect from {addr[0]}")
+        self._log(f"WS connect from {addr[0]}")
 
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.settimeout(2.0) # Prevent slow clients from hanging the push loop
@@ -209,7 +218,7 @@ class VectorscopeWebServer:
             pass
         finally:
             self._remove_client(conn)
-            print(f"[web] WS disconnect from {addr[0]}")
+            self._log(f"WS disconnect from {addr[0]}")
 
     # ------------------------------------------------------------------
     # Client registry
@@ -229,6 +238,8 @@ class VectorscopeWebServer:
             meta['z_amp'] = self._z_amp
         if hasattr(self, '_web_scale_factor'):
             meta['scale_factor'] = self._web_scale_factor
+        if hasattr(self, '_web_channels') and 'web_channels' not in meta:
+            meta['web_channels'] = self._web_channels
         self._metadata = json.dumps(meta)
         self._metadata_sent = False
 
@@ -241,6 +252,12 @@ class VectorscopeWebServer:
         """Allow player to notify web server of scaling factor."""
         self._web_scale_factor = factor
         self._metadata_sent = False
+
+    def set_web_channels(self, n):
+        """Set the number of channels in web data frames (may differ from audio channels)."""
+        if not hasattr(self, '_web_channels') or self._web_channels != n:
+            self._web_channels = n
+            self._metadata_sent = False
 
     def _add_client(self, sock):
         with self._lock:
@@ -839,7 +856,8 @@ canvas { display: block; background: #000; border-radius: 2px; }
       if (typeof evt.data === 'string') {
         try {
           const meta = JSON.parse(evt.data);
-          if (meta.channels) { channels = meta.channels; }
+          if (meta.web_channels) { channels = meta.web_channels; }
+          else if (meta.channels) { channels = meta.channels; }
           if (meta.z_amp) { zAmp = meta.z_amp; }
           if (meta.scale_factor) { scaleFactor = meta.scale_factor; }
         } catch(e) {}
