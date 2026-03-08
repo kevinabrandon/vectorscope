@@ -95,13 +95,13 @@ class Rock(VectorSprite):
 #    def destroyed(self):
         
 
-class Debris(Point):    
-     
-    def __init__(self, position, stage):
-        heading = Vector2d(random.uniform(-1.5, 1.5), random.uniform(-1.5, 1.5))
+class Debris(Point):
+
+    def __init__(self, position, stage, velocity=1.5, ttl=50):
+        heading = Vector2d(random.uniform(-velocity, velocity), random.uniform(-velocity, velocity))
         Point.__init__(self, position, heading, stage)
-        self.ttl = 50
-    
+        self.ttl = ttl
+
     def move(self, step=1.0):
         Point.move(self, step)
         r, g, b = self.color
@@ -110,6 +110,14 @@ class Debris(Point):
         g -= decay
         b -= decay
         self.color = (r, g, b)
+
+
+class LineDebris(Debris):
+    """Minimal 2-point line segment debris — for small rock explosions."""
+    pointlist = [(-3, 0), (3, 0)]
+
+    def __init__(self, position, stage, velocity=1.5, ttl=30):
+        Debris.__init__(self, position, stage, velocity=velocity, ttl=ttl)
         
 
 # Flying saucer, shoots at player

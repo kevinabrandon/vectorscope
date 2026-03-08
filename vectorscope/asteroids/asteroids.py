@@ -8,7 +8,7 @@ import random
 
 _game_logger = logging.getLogger('vectorscope.game')
 
-from .badies import Debris, Rock, Saucer
+from .badies import Debris, LineDebris, Rock, Saucer
 from .ship import Ship
 from .soundManager import playSound, playSoundContinuous, stopSound
 from .stage import Stage
@@ -45,12 +45,16 @@ class VectorRenderer:
             if color[0] <= 0 and color[1] <= 0 and color[2] <= 0:
                 return
         
-        # High-intensity for small/fast objects, standard for others
+        # Per-type intensity for Z-channel brightness control
         from .util.vectorsprites import Point
-        if isinstance(sprite, Point) or sprite.__class__.__name__ == 'ThrustJet':
-            intensity = 1.0
+        if isinstance(sprite, Point) or sprite.__class__.__name__ == 'ThrustJet' or getattr(sprite, 'high_intensity', False):
+            intensity = 1.0   # bullets, thrust, explosions, ship debris
+        elif isinstance(sprite, Ship):
+            intensity = 0.75  # player ship
+        elif isinstance(sprite, Saucer):
+            intensity = 0.66  # saucer
         else:
-            intensity = 0.5
+            intensity = 0.5   # rocks
 
         def draw_once():
             x0, y0 = self._map(points[0][0], points[0][1])
@@ -506,6 +510,8 @@ class Asteroids:
         self.stage.removeSprite(self.ship.thrustJet)
         self.gameState = "exploding"
         self.ship.explode()
+        self._spawn_debris(Vector2d(self.ship.position.x, self.ship.position.y),
+                           Debris, 6, velocity=4.0, ttl=80)
 
     def killSaucer(self, reason=None):
         stopSound("lsaucer")
@@ -513,17 +519,33 @@ class Asteroids:
         playSound("explode2")
         if reason:
             self._log("[saucer]", f"Saucer killed: {reason}")
+        if self.saucer.saucerType == Saucer.largeSaucerType:
+            self._spawn_debris(Vector2d(self.saucer.position.x, self.saucer.position.y),
+                               Debris, 6, velocity=4.0, ttl=80)
+        else:
+            self._spawn_debris(Vector2d(self.saucer.position.x, self.saucer.position.y),
+                               Debris, 6, velocity=3.0, ttl=60)
         self.stage.removeSprite(self.saucer)
         # Keep any in-flight bullets so they can still hit the player
         for bullet in self.saucer.bullets:
             self._orphaned_bullets.append(bullet)
         self.saucer = None
 
+    def _spawn_debris(self, position, cls, count, velocity, ttl):
+        for _ in range(count):
+            self.stage.addSprite(cls(Vector2d(position.x, position.y), self.stage,
+                                     velocity=velocity, ttl=ttl))
+
     def createDebris(self, sprite):
-        for _ in range(0, 25):
-            position = Vector2d(sprite.position.x, sprite.position.y)
-            debris = Debris(position, self.stage)
-            self.stage.addSprite(debris)
+        position = Vector2d(sprite.position.x, sprite.position.y)
+        rock_type = getattr(sprite, 'rockType', None)
+        if rock_type == Rock.largeRockType:
+            self._spawn_debris(position, Debris, 6, velocity=4.0, ttl=80)
+        elif rock_type == Rock.mediumRockType:
+            self._spawn_debris(position, Debris, 6, velocity=3.0, ttl=60)
+        else:
+            # Small rock
+            self._spawn_debris(position, LineDebris, 4, velocity=2.0, ttl=40)
 
     def checkScore(self):
         if self.attract_mode:

@@ -128,6 +128,7 @@ class Ship(Shooter):
         heading = Vector2d(0, 0)
         position = Vector2d(self.position.x, self.position.y)
         debris = VectorSprite(position, heading, pointlist, self.angle)
+        debris.high_intensity = True
 
         # Add debris to the stage
         self.stage.addSprite(debris)  
