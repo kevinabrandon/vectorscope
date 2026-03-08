@@ -166,8 +166,8 @@ class Asteroids:
         self._orphaned_bullets = []
         self._saucer_spawn_timer = self._rng.uniform(6.0, 12.0)
         self.explodingCount = 0.0
-        self.createRocks(self.numRocks)
         self.createNewShip()
+        self.createRocks(self.numRocks)
         self._reset_ai()
 
     def start_game(self, difficulty):
@@ -189,7 +189,6 @@ class Asteroids:
         self.show_help = False
         self.reset_attract()
         self.lives = p['lives']
-        self.createNewShip()
 
     def continue_game(self):
         """Continue after game over, keeping score and rocks."""
