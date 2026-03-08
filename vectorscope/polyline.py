@@ -248,7 +248,7 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
     return xy, blanking, intensity_data, len(polys), len(xy)
 
 
-def path_to_xy(xy, blanking, intensity, samples, amp=1.0, min_hop_samples=4):
+def path_to_xy(xy, blanking, intensity, samples, amp=1.0, min_hop_samples=4, max_hop_speed=0.02):
     """Convert a pre-built flat path with embedded pen-lifts to XY output.
 
     Unlike polylines_to_xy, this takes a single flat path (built by
@@ -297,7 +297,31 @@ def path_to_xy(xy, blanking, intensity, samples, amp=1.0, min_hop_samples=4):
     # Build effective arc-length parameterization.
     # hop_mask[i] = True means segment i (xy[i]→xy[i+1]) is a blanked hop.
     hop_mask = blanking[1:]  # trailing-edge: segment i blanked iff blanking[i+1]=True
-    effective_seglen = seglen
+    n_hops = int(hop_mask.sum())
+
+    if n_hops > 0:
+        # Per-hop effective arc: distance-proportional with floor, so each hop
+        # gets max(min_hop_samples, ceil(dist/max_hop_speed)) samples.
+        # Derivation: C_i/(sum(C_j) + L_visible)*samples = alloc_i
+        #   → C_i = alloc_i * L_visible / vis_budget
+        hop_seglens = seglen[hop_mask]
+        hop_alloc = np.maximum(
+            float(min_hop_samples),
+            np.ceil(hop_seglens / max_hop_speed)
+        )
+        total_hop_alloc = hop_alloc.sum()
+        vis_budget = max(1.0, samples - total_hop_alloc)
+        L_visible = float(seglen[~hop_mask].sum()) if n_hops < len(hop_mask) else 0.0
+
+        if L_visible > 0:
+            C_per_hop = hop_alloc * L_visible / vis_budget
+            effective_seglen = seglen.copy()
+            effective_seglen[hop_mask] = C_per_hop
+        else:
+            # Only hops, no visible content — equal weight per hop
+            effective_seglen = np.where(hop_mask, 1.0, seglen)
+    else:
+        effective_seglen = seglen
 
     s = np.concatenate(([0.0], np.cumsum(effective_seglen)))
     total = s[-1]

@@ -117,7 +117,7 @@ class AsteroidsPlayer(VectorScopePlayer):
                  initial_rocks=3, friendly_fire=False,
                  ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
                  saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
-                 difficulty=None, **kwargs):
+                 difficulty=None, max_hop_speed=0.02, **kwargs):
         # In dynamic refresh mode, we use kwargs['freq'] as the "target"
         # for a screen of average complexity.
         super().__init__(**kwargs)
@@ -125,6 +125,7 @@ class AsteroidsPlayer(VectorScopePlayer):
         self.max_vectors = max_vectors if max_vectors > 0 else None
         self.aspect_x = aspect_x
         self.penlift_samples = penlift
+        self.max_hop_speed = max_hop_speed
         self.dynamic_refresh = dynamic_refresh
         self.optimize_order = optimize_order
         self.last_t = time.monotonic()
@@ -208,15 +209,29 @@ class AsteroidsPlayer(VectorScopePlayer):
         if self.dynamic_refresh:
             diffs = np.diff(xy, axis=0)
             seglen = np.sqrt((diffs ** 2).sum(axis=1))
-            L = float(seglen.sum())
-            n_hops = int(np.sum(blanking)) + 1
-            current_samples = max(200, int(np.ceil(L / self.target_speed)) + n_hops * 4 + 50)
+            hop_mask = blanking[1:]  # trailing-edge: segment i blanked iff blanking[i+1]=True
+            L_visible = float(seglen[~hop_mask].sum())
+
+            # Per-hop sample allocation: distance-proportional with floor
+            hop_seglens = seglen[hop_mask]
+            hop_alloc = np.maximum(
+                self.penlift_samples,
+                np.ceil(hop_seglens / self.max_hop_speed).astype(int)
+            )
+            # Estimate closing loop hop that path_to_xy will add
+            closing_dist = float(np.sqrt(((xy[-1] - xy[0]) ** 2).sum()))
+            closing_alloc = max(self.penlift_samples,
+                                int(np.ceil(closing_dist / self.max_hop_speed)))
+            n_hop_total = int(hop_alloc.sum()) + closing_alloc
+
+            current_samples = max(200, int(np.ceil(L_visible / self.target_speed)) + n_hop_total + 50)
         else:
             current_samples = self.samples
 
         new_xy, new_blanking, new_intensities = path_to_xy(
             xy, blanking, intensity, current_samples, amp=self.amp,
-            min_hop_samples=4,
+            min_hop_samples=self.penlift_samples,
+            max_hop_speed=self.max_hop_speed,
         )
 
         self._prepare_output(new_xy, new_blanking, new_intensities)

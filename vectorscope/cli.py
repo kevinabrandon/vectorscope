@@ -205,6 +205,9 @@ def _build_parser():
                                   help="Saucer bullet time-to-live in frames (default: 60 large, 90 small)")
     asteroids_parser.add_argument("--saucer-max-bullets", type=int, default=None,
                                   help="Max simultaneous saucer bullets (default: 1)")
+    asteroids_parser.add_argument("--max-hop-speed", type=float, default=0.02,
+                                  help="Max beam speed during blanked hops (normalized units/sample). "
+                                       "Lower = slower hops, less ringing, more samples.")
     asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
                                   help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
     asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
@@ -419,6 +422,7 @@ def _create_player(args, web_server=None):
             max_vectors=args.max_vectors,
             aspect_x=args.aspect,
             penlift=args.penlift,
+            max_hop_speed=args.max_hop_speed,
             dynamic_refresh=args.dynamic,
             optimize_order=args.optimize,
             initial_rocks=args.rocks,
