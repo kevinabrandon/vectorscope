@@ -11,7 +11,7 @@ import numpy as np
 from HersheyFonts import HersheyFonts
 
 from .base import VectorScopePlayer
-from .polyline import path_to_xy
+from .polyline import path_to_xy, optimize_flat_path
 from .asteroids.asteroids import Asteroids
 
 
@@ -207,6 +207,9 @@ class AsteroidsPlayer(VectorScopePlayer):
 
         # Normalize: game coords [0, 2048] → [-0.9, 0.9] in one vectorized op
         xy = (xy / 1024.0 - 1.0) * 0.9
+
+        if self.optimize_order:
+            xy, blanking, intensity = optimize_flat_path(xy, blanking, intensity)
 
         diffs = np.diff(xy, axis=0)
         seglen = np.sqrt((diffs ** 2).sum(axis=1))

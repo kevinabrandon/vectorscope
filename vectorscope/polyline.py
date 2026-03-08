@@ -248,6 +248,51 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
     return xy, blanking, intensity_data, len(polys), len(xy)
 
 
+def optimize_flat_path(xy, blanking, intensity):
+    """Reorder strokes in a flat path to minimize total hop travel distance.
+
+    Uses greedy nearest-neighbor: each stroke starts nearest to where
+    the previous stroke ended.
+    """
+    if len(xy) < 2:
+        return xy, blanking, intensity
+
+    hop_starts = np.where(blanking)[0]
+    if len(hop_starts) == 0:
+        return xy, blanking, intensity   # single stroke, nothing to reorder
+
+    starts = np.concatenate([[0], hop_starts])
+    ends   = np.concatenate([hop_starts - 1, [len(xy) - 1]])
+    n = len(starts)
+
+    strokes_xy  = [xy[s:e+1]               for s, e in zip(starts, ends)]
+    strokes_blk = [blanking[s:e+1].copy()  for s, e in zip(starts, ends)]
+    strokes_itn = [intensity[s:e+1]         for s, e in zip(starts, ends)]
+
+    # Greedy nearest-neighbor reorder anchored at stroke 0
+    remaining = list(range(1, n))
+    order = [0]
+    while remaining:
+        prev_end = strokes_xy[order[-1]][-1]
+        best = min(remaining,
+                   key=lambda j: ((strokes_xy[j][0] - prev_end) ** 2).sum())
+        remaining.remove(best)
+        order.append(best)
+
+    # Reconstruct path in new order
+    out_xy, out_blk, out_itn = [], [], []
+    for i, k in enumerate(order):
+        blk_k = strokes_blk[k]
+        blk_k[0] = (i > 0)   # first stroke: no hop arrival; rest: hop arrival
+        out_xy.append(strokes_xy[k])
+        out_blk.append(blk_k)
+        out_itn.append(strokes_itn[k])
+
+    return (np.vstack(out_xy),
+            np.concatenate(out_blk),
+            np.concatenate(out_itn))
+
+
 def path_to_xy(xy, blanking, intensity, samples, amp=1.0, min_hop_samples=4, max_hop_speed=0.02):
     """Convert a pre-built flat path with embedded pen-lifts to XY output.
 
