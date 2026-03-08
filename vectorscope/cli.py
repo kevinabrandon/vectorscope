@@ -187,6 +187,10 @@ def _build_parser():
                                   help="Aspect ratio (X scale)")
     asteroids_parser.add_argument("--penlift", type=int, default=20,
                                   help="Blanked samples between vectors")
+    asteroids_parser.add_argument("--seed", type=int, default=None,
+                                  help="RNG seed for deterministic gameplay (useful for benchmarking)")
+    asteroids_parser.add_argument("--bench-frames", type=int, default=None,
+                                  help="Run for N frames, print smp/bfps stats, then exit")
     asteroids_parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default=None,
                                   help="Game difficulty preset (overridden by explicit args)")
     asteroids_parser.add_argument("--rocks", type=int, default=None,
@@ -208,11 +212,9 @@ def _build_parser():
     asteroids_parser.add_argument("--max-hop-speed", type=float, default=0.02,
                                   help="Max beam speed during blanked hops (normalized units/sample). "
                                        "Lower = slower hops, less ringing, more samples.")
-    asteroids_parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
-                                  help="Dynamic refresh: constant drawing speed (flicker increases with complexity)")
     asteroids_parser.add_argument("--optimize", action=argparse.BooleanOptionalAction, default=True,
                                   help="Optimize contour order to minimize beam travel (slows down CPU, but reduces flicker)")
-    add_common_args(asteroids_parser, freq_default=60, rate_default=192000)
+    add_common_args(asteroids_parser, rate_default=192000, include_freq=False)
     subs['asteroids'] = asteroids_parser
 
     # Sinc surface subcommand
@@ -423,7 +425,8 @@ def _create_player(args, web_server=None):
             aspect_x=args.aspect,
             penlift=args.penlift,
             max_hop_speed=args.max_hop_speed,
-            dynamic_refresh=args.dynamic,
+            seed=args.seed,
+            bench_frames=args.bench_frames,
             optimize_order=args.optimize,
             initial_rocks=args.rocks,
             friendly_fire=args.friendly_fire,

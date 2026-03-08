@@ -89,6 +89,8 @@ class Asteroids:
         self.maxc = float(maxc)
         self.aspect_x = float(aspect_x)
         self._rng = random.Random(seed)
+        if seed is not None:
+            random.seed(seed)  # seed global random used by sprite constructors
         # Store CLI overrides — these layer on top of difficulty presets
         self._cli_overrides = {}
         if friendly_fire:

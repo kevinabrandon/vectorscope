@@ -113,35 +113,29 @@ class PolylineBuilder:
 
 class AsteroidsPlayer(VectorScopePlayer):
     def __init__(self, max_vectors=800, aspect_x=0.75, penlift=20,
-                 dynamic_refresh=False, optimize_order=False,
+                 optimize_order=False,
                  initial_rocks=3, friendly_fire=False,
                  ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
                  saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
-                 difficulty=None, max_hop_speed=0.02, **kwargs):
-        # In dynamic refresh mode, we use kwargs['freq'] as the "target"
-        # for a screen of average complexity.
+                 difficulty=None, max_hop_speed=0.02, seed=None,
+                 bench_frames=None, **kwargs):
         super().__init__(**kwargs)
         # Treat 0 as unlimited
         self.max_vectors = max_vectors if max_vectors > 0 else None
         self.aspect_x = aspect_x
         self.penlift_samples = penlift
         self.max_hop_speed = max_hop_speed
-        self.dynamic_refresh = dynamic_refresh
         self.optimize_order = optimize_order
         self.last_t = time.monotonic()
         self.last_thrust_time = 0.0
         
-        # Calculate a "units per sample" constant based on the initial freq.
-        # A circle of radius 1 (circumference ~6.28) at 60Hz and 96k sr
-        # takes ~1600 samples. Speed = 6.28 / 1600 = 0.0039.
-        # We'll use a slightly different heuristic based on the user's freq.
-        target_samples = self.samples if self.samples > 0 else 1600
-        # Average "screen units" complexity (arbitrary units)
-        # 10.0 units is about a circle + some text.
-        self.target_speed = 10.0 / target_samples
+        # Visible arc sampling rate: normalized units per sample.
+        # Calibrated at 60 redraws/sec equivalent — scales with sample rate.
+        self.target_speed = 10.0 * 60.0 / self.sample_rate
         
         # Initialize the game
         self.game = Asteroids(maxc=2048, aspect_x=aspect_x, num_rocks=initial_rocks,
+                              seed=seed,
                               friendly_fire=friendly_fire,
                               ship_bullet_speed=ship_bullet_speed,
                               ship_bullet_ttl=ship_bullet_ttl,
@@ -168,6 +162,10 @@ class AsteroidsPlayer(VectorScopePlayer):
         self._tty_fd = None
         self._tty_old_settings = None
 
+        # Benchmarking
+        self._bench_frames = bench_frames
+        self._bench_smp = []
+
         # Request a fixed blocksize for consistent game timing
         self._stream_blocksize = 2048
 
@@ -177,17 +175,21 @@ class AsteroidsPlayer(VectorScopePlayer):
     def _update_frame(self):
         t0 = time.perf_counter()
         now = time.monotonic()
-        dt = now - self.last_t
+
+        if self._bench_frames is not None:
+            # Fixed dt for deterministic benchmarking
+            dt = 1.0 / 60.0
+        else:
+            dt = now - self.last_t
+            if dt > 0.1:
+                dt = 0.1
+
         self.last_t = now
-        
+
         # Auto-off thruster if no heartbeat for 100ms
         if self.game.ship and self.game.ship.thrustJet.accelerating:
             if now - self.last_thrust_time > 0.1:
                 self.game.ship.decreaseThrust()
-
-        # Limit dt to avoid massive jumps
-        if dt > 0.1:
-            dt = 0.1
             
         self.builder.clear()
         self.game.step(dt, self.builder, self.max_vectors)
@@ -206,27 +208,24 @@ class AsteroidsPlayer(VectorScopePlayer):
         # Normalize: game coords [0, 2048] → [-0.9, 0.9] in one vectorized op
         xy = (xy / 1024.0 - 1.0) * 0.9
 
-        if self.dynamic_refresh:
-            diffs = np.diff(xy, axis=0)
-            seglen = np.sqrt((diffs ** 2).sum(axis=1))
-            hop_mask = blanking[1:]  # trailing-edge: segment i blanked iff blanking[i+1]=True
-            L_visible = float(seglen[~hop_mask].sum())
+        diffs = np.diff(xy, axis=0)
+        seglen = np.sqrt((diffs ** 2).sum(axis=1))
+        hop_mask = blanking[1:]  # trailing-edge: segment i blanked iff blanking[i+1]=True
+        L_visible = float(seglen[~hop_mask].sum())
 
-            # Per-hop sample allocation: distance-proportional with floor
-            hop_seglens = seglen[hop_mask]
-            hop_alloc = np.maximum(
-                self.penlift_samples,
-                np.ceil(hop_seglens / self.max_hop_speed).astype(int)
-            )
-            # Estimate closing loop hop that path_to_xy will add
-            closing_dist = float(np.sqrt(((xy[-1] - xy[0]) ** 2).sum()))
-            closing_alloc = max(self.penlift_samples,
-                                int(np.ceil(closing_dist / self.max_hop_speed)))
-            n_hop_total = int(hop_alloc.sum()) + closing_alloc
+        # Per-hop sample allocation: distance-proportional with floor
+        hop_seglens = seglen[hop_mask]
+        hop_alloc = np.maximum(
+            self.penlift_samples,
+            np.ceil(hop_seglens / self.max_hop_speed).astype(int)
+        )
+        # Estimate closing loop hop that path_to_xy will add
+        closing_dist = float(np.sqrt(((xy[-1] - xy[0]) ** 2).sum()))
+        closing_alloc = max(self.penlift_samples,
+                            int(np.ceil(closing_dist / self.max_hop_speed)))
+        n_hop_total = int(hop_alloc.sum()) + closing_alloc
 
-            current_samples = max(200, int(np.ceil(L_visible / self.target_speed)) + n_hop_total + 50)
-        else:
-            current_samples = self.samples
+        current_samples = max(200, int(np.ceil(L_visible / self.target_speed)) + n_hop_total + 50)
 
         new_xy, new_blanking, new_intensities = path_to_xy(
             xy, blanking, intensity, current_samples, amp=self.amp,
@@ -238,6 +237,20 @@ class AsteroidsPlayer(VectorScopePlayer):
 
         n_lifts = int(np.sum(blanking))
         self._increment_compute_stats(time.perf_counter() - t0, n_lifts + 1, n_lifts, current_samples)
+
+        if self._bench_frames is not None:
+            self._bench_smp.append(current_samples)
+            if len(self._bench_smp) >= self._bench_frames:
+                self._print_bench_stats()
+                import os, signal
+                os.kill(os.getpid(), signal.SIGINT)
+
+    def _print_bench_stats(self):
+        smp = np.array(self._bench_smp, dtype=np.float64)
+        bfps = self.sample_rate / smp
+        print(f"\n--- Benchmark ({len(smp)} frames) ---")
+        print(f"  smp   mean={smp.mean():.0f}  std={smp.std():.0f}  min={smp.min():.0f}  max={smp.max():.0f}")
+        print(f"  bfps  mean={bfps.mean():.1f}  std={bfps.std():.1f}  min={bfps.min():.1f}  max={bfps.max():.1f}")
 
     def _start_background(self):
         """Start the game update loop in a background thread."""

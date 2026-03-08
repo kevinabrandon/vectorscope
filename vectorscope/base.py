@@ -944,16 +944,18 @@ class VectorScopePlayer:
             self._on_stop()
 
 
-def add_common_args(parser, freq_default=100, rate_default=48000):
+def add_common_args(parser, freq_default=100, rate_default=48000, include_freq=True):
     """Add common arguments to an argument parser.
 
     freq_default sets the default trace frequency for the command.
     rate_default sets the default sample rate for the command.
+    include_freq controls whether --freq is added (some commands don't use it).
     """
     parser.add_argument("--rate", type=int, default=rate_default,
                         help="Sample rate in Hz")
-    parser.add_argument("--freq", type=float, default=freq_default,
-                        help="Trace frequency in Hz")
+    if include_freq:
+        parser.add_argument("--freq", type=float, default=freq_default,
+                            help="Trace frequency in Hz")
     parser.add_argument("--amp", type=float, default=0.7,
                         help="Output amplitude (0-1)")
     parser.add_argument("--device", type=str, default=None,
@@ -1005,7 +1007,7 @@ def common_args_from_parsed(args, web_server=None):
     """Extract common arguments as a dict for passing to VectorScopePlayer."""
     return {
         'sample_rate': args.rate,
-        'freq': args.freq,
+        'freq': getattr(args, 'freq', 60),
         'amp': args.amp,
         'device': args.device,
         'noise': args.noise,
@@ -1013,7 +1015,7 @@ def common_args_from_parsed(args, web_server=None):
         'noise_type': args.noise_type,
         'noise_mode': args.noise_mode,
         'animate_freq_range': args.animate_freq,
-        'freq_sign': -1 if args.freq < 0 else 1,
+        'freq_sign': -1 if getattr(args, 'freq', 60) < 0 else 1,
         'channels': args.channels,
         'z_amp': args.z_amp,
         'z_delay': args.z_delay,
