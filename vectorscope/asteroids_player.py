@@ -11,16 +11,28 @@ import numpy as np
 from HersheyFonts import HersheyFonts
 
 from .base import VectorScopePlayer
-from .polyline import polylines_to_xy
+from .polyline import path_to_xy
 from .asteroids.asteroids import Asteroids
 
 
 class PolylineBuilder:
+    """Builds a single flat XY path with embedded blanked pen-lift segments.
+
+    move_to() starts a new visible shape.  If a previous shape exists, a
+    single blanked hop point is inserted so that arc-length resampling in
+    path_to_xy() automatically allocates samples proportional to the travel
+    distance — short hops get few blanked samples (beam barely moves, Z-blank
+    leakage invisible), long hops get many (beam moves slowly, leakage short).
+
+    Blanking convention (trailing-edge): blanking[i] = True means the segment
+    from point i-1 to point i is blanked.
+    """
+
     def __init__(self, hf=None):
-        self.polylines = []
-        self.intensities = []
-        self.current_polyline = []
-        self.current_intensity = 1.0
+        self._pts = []
+        self._blk = []
+        self._itn = []
+        self._cur_intensity = 1.0
         self.hf = hf
         if self.hf is None:
             self.hf = HersheyFonts()
@@ -28,98 +40,80 @@ class PolylineBuilder:
             self.hf.normalize_rendering(1.0)
 
     def move_to(self, x, y, intensity=1.0):
-        if self.current_polyline:
-            self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
-            self.intensities.append(self.current_intensity)
-        self.current_polyline = [[x, y]]
-        self.current_intensity = intensity
+        self._cur_intensity = intensity
+        if self._pts:
+            # Blanked hop: insert destination as a blanked arrival point.
+            # The segment from the previous visible point to here is blanked.
+            self._pts.append([x, y])
+            self._blk.append(True)
+            self._itn.append(0.0)
+        else:
+            # Very first point — no preceding segment, start visible.
+            self._pts.append([x, y])
+            self._blk.append(False)
+            self._itn.append(intensity)
 
     def line_to(self, x, y):
-        self.current_polyline.append([x, y])
+        self._pts.append([x, y])
+        self._blk.append(False)
+        self._itn.append(self._cur_intensity)
 
     def text_at(self, x, y, text, size=1, rot=0, intensity=1.0):
         if not text:
             return
-        if self.current_polyline:
-            self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
-            self.intensities.append(self.current_intensity)
-        self.current_polyline = []
-        self.current_intensity = intensity
-
-        # HersheyFonts rendering
-        # We need to scale and position the text
-        # size=1 in David's code seems to be about 20-30 units high in a 2048 space.
-        # HersheyFonts normalize_rendering(1.0) makes it roughly 1.0 units high.
         scale = size * 25.0
-        
-        # hf.strokes_for_text returns a list of strokes
-        # Each stroke is a list of (x, y)
         strokes = self.hf.strokes_for_text(text)
-        
         cos_val = np.cos(np.radians(rot))
         sin_val = np.sin(np.radians(rot))
-
         for stroke in strokes:
             pts = np.array(stroke, dtype=np.float64)
-            # Scale
+            if len(pts) == 0:
+                continue
             pts *= scale
-            
-            # Rotate if needed
             if rot != 0:
-                # Using the same rotation logic as VectorSprite if possible, 
-                # but standard CCW rotation is usually better for fonts.
-                # However, David's code uses rot=0 always.
                 rx = pts[:, 0] * cos_val - pts[:, 1] * sin_val
                 ry = pts[:, 0] * sin_val + pts[:, 1] * cos_val
                 pts[:, 0] = rx
                 pts[:, 1] = ry
-
-            # Translate to (x, y)
             pts[:, 0] += x
             pts[:, 1] += y
-            self.polylines.append(pts)
-            self.intensities.append(self.current_intensity)
+            self.move_to(pts[0, 0], pts[0, 1], intensity=intensity)
+            for pt in pts[1:]:
+                self.line_to(pt[0], pt[1])
 
     def text_at_centered(self, x, y, text, size=1, rot=0, intensity=1.0):
-        """Center text horizontally at the given X-coordinate."""
         if not text:
             return
-        
-        # Manually calculate width from strokes since get_text_extent doesn't exist
         strokes = self.hf.strokes_for_text(text)
         if not strokes:
             return
-            
-        all_x = []
-        for s in strokes:
-            for p in s:
-                all_x.append(p[0])
-        
+        all_x = [p[0] for s in strokes for p in s]
         if not all_x:
             return
-            
         width = max(all_x) - min(all_x)
         scale = size * 25.0
         offset_x = (width * scale) / 2.0
         self.text_at(x - offset_x, y, text, size=size, rot=rot, intensity=intensity)
 
-    def get_polylines(self):
-        if self.current_polyline:
-            self.polylines.append(np.array(self.current_polyline, dtype=np.float64))
-            self.intensities.append(self.current_intensity)
-            self.current_polyline = []
-        return self.polylines, self.intensities
+    def get_path(self):
+        if not self._pts:
+            return (np.zeros((0, 2), dtype=np.float64),
+                    np.zeros(0, dtype=bool),
+                    np.zeros(0, dtype=np.float32))
+        return (np.array(self._pts, dtype=np.float64),
+                np.array(self._blk, dtype=bool),
+                np.array(self._itn, dtype=np.float32))
 
     def clear(self):
-        self.polylines = []
-        self.intensities = []
-        self.current_polyline = []
-        self.current_intensity = 1.0
+        self._pts = []
+        self._blk = []
+        self._itn = []
+        self._cur_intensity = 1.0
 
 
 class AsteroidsPlayer(VectorScopePlayer):
     def __init__(self, max_vectors=800, aspect_x=0.75, penlift=20,
-                 dynamic_refresh=False, optimize_order=True,
+                 dynamic_refresh=False, optimize_order=False,
                  initial_rocks=3, friendly_fire=False,
                  ship_bullet_speed=None, ship_bullet_ttl=None, ship_max_bullets=None,
                  saucer_bullet_speed=None, saucer_bullet_ttl=None, saucer_max_bullets=None,
@@ -196,56 +190,39 @@ class AsteroidsPlayer(VectorScopePlayer):
             
         self.builder.clear()
         self.game.step(dt, self.builder, self.max_vectors)
-        
-        polys, intensities = self.builder.get_polylines()
-        
-        # Fixed-space normalization
-        fixed_polys = []
-        for p in polys:
-            fixed_polys.append((p / 1024.0 - 1.0) * 0.9)
-        polys = fixed_polys
 
-        # At high sample rates, we need more points per segment to make them visible
-        # and to prevent truncation during rounding.
-        min_pts = 2
-        if self.sample_rate >= 192000:
-            min_pts = 6
-        elif self.sample_rate >= 96000:
-            min_pts = 4
+        xy, blanking, intensity = self.builder.get_path()
 
-        # Determine how many samples to use for this frame.
+        if len(xy) == 0:
+            self._prepare_output(
+                np.zeros((self.samples, 2), dtype=np.float32),
+                np.zeros(self.samples, dtype=bool),
+                np.zeros(self.samples, dtype=np.float32),
+            )
+            self._increment_compute_stats(time.perf_counter() - t0, 0, 0, 0)
+            return
+
+        # Normalize: game coords [0, 2048] → [-0.9, 0.9] in one vectorized op
+        xy = (xy / 1024.0 - 1.0) * 0.9
+
         if self.dynamic_refresh:
-            # Sum the distance (arc length), accounting for min samples per segment
-            total_samples = 0
-            for p in polys:
-                if len(p) < 2: continue
-                d = np.diff(p, axis=0)
-                L = np.sqrt((d**2).sum(axis=1)).sum()
-                # Ensure each segment gets enough samples at its speed,
-                # plus its required minimum for visibility.
-                total_samples += max(min_pts, L / self.target_speed)
-            
-            # Add pen lifts and a safety margin (extra 50 samples)
-            current_samples = int(np.ceil(total_samples)) + self.penlift_samples * len(polys) + 50
-            current_samples = max(200, current_samples)
+            diffs = np.diff(xy, axis=0)
+            seglen = np.sqrt((diffs ** 2).sum(axis=1))
+            L = float(seglen.sum())
+            n_hops = int(np.sum(blanking)) + 1
+            current_samples = max(200, int(np.ceil(L / self.target_speed)) + n_hops * 4 + 50)
         else:
             current_samples = self.samples
 
-        # Convert to XY and pre-calculate Z/Web signals
-        new_xy, new_blanking, new_intensities, n_lifts, n_samples = polylines_to_xy(
-            polys, current_samples, amp=self.amp,
-            pen_lift_samples=self.penlift_samples,
-            margin=0.9,
-            optimize_order=self.optimize_order,
-            min_points_per_segment=min_pts,
-            normalize=False,
-            intensities=intensities
+        new_xy, new_blanking, new_intensities = path_to_xy(
+            xy, blanking, intensity, current_samples, amp=self.amp,
+            min_hop_samples=4,
         )
-        
-        # Offload math and preparation from audio thread
+
         self._prepare_output(new_xy, new_blanking, new_intensities)
-            
-        self._increment_compute_stats(time.perf_counter() - t0, len(polys), n_lifts, n_samples)
+
+        n_lifts = int(np.sum(blanking))
+        self._increment_compute_stats(time.perf_counter() - t0, n_lifts + 1, n_lifts, current_samples)
 
     def _start_background(self):
         """Start the game update loop in a background thread."""

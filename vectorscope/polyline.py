@@ -85,6 +85,7 @@ def optimize_contour_order(polys):
 
 
 def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
+                    min_pen_lift_samples=4,
                     margin=0.9, optimize_order=True,
                     min_points_per_segment=2, normalize=True,
                     intensities=None):
@@ -94,7 +95,8 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         polys: List of Nx2 arrays (raw polylines from font renderer).
         samples: Total number of output samples.
         amp: Amplitude scaling factor.
-        pen_lift_samples: Blanked interpolation samples between contours.
+        pen_lift_samples: Max blanked interpolation samples between contours.
+        min_pen_lift_samples: Minimum pen-lift samples for zero-distance hops.
         margin: Scaling margin (0.9 = 10% border).
         optimize_order: If True, reorder contours to minimize beam travel.
         min_points_per_segment: Minimum points per resampled segment.
@@ -158,9 +160,19 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
             new_polys.append(poly)
         polys = new_polys
 
+    # Pre-compute per-transition pen-lift counts (distance-proportional)
+    lift_counts = []
+    if pen_lift_samples > 0:
+        for i in range(len(polys)):
+            next_start = polys[i + 1][0] if i < len(polys) - 1 else polys[0][0]
+            dist = float(np.sqrt(((next_start - polys[i][-1]) ** 2).sum()))
+            t = min(1.0, dist / 2.0)
+            n = int(min_pen_lift_samples + (pen_lift_samples - min_pen_lift_samples) * t)
+            lift_counts.append(max(min_pen_lift_samples, n))
+
     # Allocate samples across contours.
     # We must ensure each contour gets at least min_points_per_segment.
-    pen_lift_total = pen_lift_samples * len(polys)  # between each + closing wrap
+    pen_lift_total = sum(lift_counts) if lift_counts else 0
     contour_budget = samples - pen_lift_total
     
     if contour_budget < len(polys) * min_points_per_segment:
@@ -193,24 +205,26 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
         inten = intensities[i] if intensities is not None else 1.0
         intensity_parts.append(np.full(len(pts), inten, dtype=np.float32))
 
-        if pen_lift_samples > 0 and i < len(polys) - 1:
+        if lift_counts and i < len(polys) - 1:
+            n_lift = lift_counts[i]
             start_pt = pts[-1]
             end_pt = polys[i + 1][0]
-            t_lift = np.linspace(0, 1, pen_lift_samples, dtype=np.float64)
+            t_lift = np.linspace(0, 1, n_lift, dtype=np.float64)
             lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
             out.append(lift)
-            blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
-            intensity_parts.append(np.zeros(pen_lift_samples, dtype=np.float32))
+            blanking_parts.append(np.ones(n_lift, dtype=bool))
+            intensity_parts.append(np.zeros(n_lift, dtype=np.float32))
 
     # Closing pen lift: wrap from end of last contour back to start of first
-    if pen_lift_samples > 0 and out:
+    if lift_counts and out:
+        n_lift = lift_counts[-1]
         start_pt = out[-1][-1]
         end_pt = polys[0][0]
-        t_lift = np.linspace(0, 1, pen_lift_samples, dtype=np.float64)
+        t_lift = np.linspace(0, 1, n_lift, dtype=np.float64)
         lift = start_pt * (1 - t_lift[:, np.newaxis]) + end_pt * t_lift[:, np.newaxis]
         out.append(lift)
-        blanking_parts.append(np.ones(pen_lift_samples, dtype=bool))
-        intensity_parts.append(np.zeros(pen_lift_samples, dtype=np.float32))
+        blanking_parts.append(np.ones(n_lift, dtype=bool))
+        intensity_parts.append(np.zeros(n_lift, dtype=np.float32))
 
     xy = np.vstack(out)
     blanking = np.concatenate(blanking_parts)
@@ -232,3 +246,77 @@ def polylines_to_xy(polys, samples, amp=1.0, pen_lift_samples=0,
     xy = np.clip(xy * amp, -1.0, 1.0).astype(np.float32)
 
     return xy, blanking, intensity_data, len(polys), len(xy)
+
+
+def path_to_xy(xy, blanking, intensity, samples, amp=1.0, min_hop_samples=4):
+    """Convert a pre-built flat path with embedded pen-lifts to XY output.
+
+    Unlike polylines_to_xy, this takes a single flat path (built by
+    PolylineBuilder) with blanked hop segments already embedded.
+
+    Blanked hops use a modified arc-length parameterization: each hop is
+    assigned a fixed weight (min_hop_samples/samples of the total parameter
+    range) regardless of its actual travel distance.  This guarantees the
+    Z-blank circuit gets exactly min_hop_samples to settle between objects
+    while the remaining budget is distributed across visible arc proportionally.
+    Long hops still get more samples than short ones (proportional to actual
+    distance within that fixed-weight allocation — they just all share the same
+    total weight class).
+
+    Blanking convention (trailing-edge): blanking[i] = True means the segment
+    FROM point i-1 TO point i was blanked.  blanking[0] is unused.
+
+    Args:
+        xy: Nx2 float64 array, pre-normalized to oscilloscope coordinates.
+        blanking: N bool array.
+        intensity: N float32 array.
+        samples: desired output sample count.
+        amp: amplitude scaling applied before clipping to [-1, 1].
+        min_hop_samples: samples reserved per blanked hop for Z-blank settle.
+
+    Returns:
+        (xy_out, blanking_out, intensity_out) as (float32 Sx2, bool S, float32 S).
+    """
+    if len(xy) < 2:
+        out_xy = np.zeros((samples, 2), dtype=np.float32)
+        out_blk = np.ones(samples, dtype=bool)
+        out_itn = np.zeros(samples, dtype=np.float32)
+        return out_xy, out_blk, out_itn
+
+    # Close the loop: blanked return from last point to first.
+    # Without this the beam jumps bare across the screen at the frame boundary,
+    # causing inter-frame ringing and a faint visible line.
+    if not np.allclose(xy[-1], xy[0], atol=1e-9):
+        xy = np.vstack([xy, xy[0:1]])
+        blanking = np.concatenate([blanking, [True]])
+        intensity = np.concatenate([intensity, np.float32([0.0])])
+
+    diffs = np.diff(xy, axis=0)
+    seglen = np.sqrt((diffs ** 2).sum(axis=1))
+
+    # Build effective arc-length parameterization.
+    # hop_mask[i] = True means segment i (xy[i]→xy[i+1]) is a blanked hop.
+    hop_mask = blanking[1:]  # trailing-edge: segment i blanked iff blanking[i+1]=True
+    effective_seglen = seglen
+
+    s = np.concatenate(([0.0], np.cumsum(effective_seglen)))
+    total = s[-1]
+
+    if total <= 0:
+        out_xy = np.tile(xy[:1], (samples, 1)).astype(np.float32)
+        out_blk = blanking[:1].repeat(samples)
+        out_itn = np.zeros(samples, dtype=np.float32)
+        return out_xy, out_blk, out_itn
+
+    t = np.linspace(0.0, total, samples)
+    x_out = np.interp(t, s, xy[:, 0])
+    y_out = np.interp(t, s, xy[:, 1])
+
+    # For each output sample find which segment it falls in (0 = first segment).
+    # Segment i spans xy[i]→xy[i+1]; trailing-edge blanking is blanking[i+1].
+    seg_idx = np.clip(np.searchsorted(s[1:], t, side='left'), 0, len(xy) - 2)
+    blk_out = blanking[seg_idx + 1]
+    itn_out = np.where(blk_out, np.float32(0.0), intensity[seg_idx + 1]).astype(np.float32)
+
+    xy_out = np.clip(np.column_stack((x_out, y_out)) * amp, -1.0, 1.0).astype(np.float32)
+    return xy_out, blk_out, itn_out
