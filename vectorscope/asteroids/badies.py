@@ -135,45 +135,81 @@ class Saucer(Shooter):
     bulletTtl = [60, 90]
     bulletVelocity = 5  
     
-    def __init__(self, stage, saucerType, ship):                
-        position = Vector2d(0.0, random.uniform(0.0, float(stage.height)))
-        heading = Vector2d(self.velocities[saucerType], 0.0)
+    def __init__(self, stage, saucerType, ship):
+        mid_lo, mid_hi = 0.25, 0.75
+        v = self.velocities[saucerType]
+        side = random.choice(('left', 'right', 'bottom'))
+
+        if side == 'left':
+            x = 0.0
+            y = random.uniform(stage.height * mid_lo, stage.height * mid_hi)
+            vx, vy = v, 0.0
+        elif side == 'right':
+            x = float(stage.width)
+            y = random.uniform(stage.height * mid_lo, stage.height * mid_hi)
+            vx, vy = -v, 0.0
+        else:  # bottom
+            x = random.uniform(stage.width * mid_lo, stage.width * mid_hi)
+            y = 0.0
+            vx, vy = 0.0, v
+
+        position = Vector2d(x, y)
+        heading = Vector2d(vx, vy)
+        self.side = side
         self.saucerType = saucerType
         self.ship = ship
         self.scoreValue = self.scores[saucerType]
         stopSound("ssaucer")
-        stopSound("lsaucer")            
-        if saucerType == self.largeSaucerType:            
-            playSoundContinuous("lsaucer")            
-        else:            
+        stopSound("lsaucer")
+        if saucerType == self.largeSaucerType:
+            playSoundContinuous("lsaucer")
+        else:
             playSoundContinuous("ssaucer")
         self.laps = 0
-        self.lastx = 0
+        self._last_primary = x if side in ('left', 'right') else y
         self._fire_cooldown = 0.0
-        
+
         # Scale the shape and create the VectorSprite
-        flipped = [(x, -y) for x, y in self.pointlist]
+        flipped = [(px, -py) for px, py in self.pointlist]
         newPointList = [self.scale(point, self.scales[saucerType]) for point in flipped]
         Shooter.__init__(self, position, heading, newPointList, stage)
-        
+
     def move(self, step=1.0):
         Shooter.move(self, step)
 
-        if (self.position.x > self.stage.width * 0.33) and (self.position.x < self.stage.width * 0.66):
-            self.heading.y = self.heading.x
-        else:
-            self.heading.y = 0
+        if self.side in ('left', 'right'):
+            # Vertical drift in the horizontal middle zone
+            if self.stage.width * 0.33 < self.position.x < self.stage.width * 0.66:
+                self.heading.y = self.heading.x
+            else:
+                self.heading.y = 0.0
+            # Lap detection: x wraps opposite to travel direction
+            cur = self.position.x
+            if self.side == 'left' and self._last_primary > cur:
+                self._last_primary = 0.0
+                self.laps += 1
+            elif self.side == 'right' and self._last_primary < cur:
+                self._last_primary = float(self.stage.width)
+                self.laps += 1
+            else:
+                self._last_primary = cur
+        else:  # bottom, moving up
+            # Horizontal drift in the vertical middle zone
+            if self.stage.height * 0.33 < self.position.y < self.stage.height * 0.66:
+                self.heading.x = self.heading.y
+            else:
+                self.heading.x = 0.0
+            # Lap detection: y wraps from top back to bottom
+            cur = self.position.y
+            if self._last_primary > cur:
+                self._last_primary = 0.0
+                self.laps += 1
+            else:
+                self._last_primary = cur
 
         self._fire_cooldown -= step
         if self._fire_cooldown <= 0:
             self.fireBullet()
-        
-        # have we lapped?        
-        if self.lastx > self.position.x:
-            self.lastx = 0
-            self.laps += 1
-        else:
-            self.lastx = self.position.x
                 
     # Set the bullet velocity and create the bullet
     def fireBullet(self):
