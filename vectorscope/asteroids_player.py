@@ -354,10 +354,11 @@ class AsteroidsPlayer(VectorScopePlayer):
             ship.rotateLeft(step * 5)
         elif ch in ('s', 'S'): # Down / Fire?
             if ship.fireBullet():
-                self.game._log("[bullet]", "Player Ship fired bullet.", level=logging.DEBUG)
+                self.game._log("[bullet]", "ship-fired")
         elif ch == ' ':
             if ship.fireBullet():
-                self.game._log("[bullet]", "Player Ship fired bullet.", level=logging.DEBUG)
+                self.game._log("[bullet]", "ship-fired")
         elif ch in ('h', 'H'):
+            self.game._hyperspace_enter_pos = (ship.position.x, ship.position.y)
             ship.hyperspace_exit_pos = self.game.find_safe_position()
             ship.enterHyperSpace()

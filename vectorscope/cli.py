@@ -191,6 +191,9 @@ def _build_parser():
                                   help="RNG seed for deterministic gameplay (useful for benchmarking)")
     asteroids_parser.add_argument("--bench-frames", type=int, default=None,
                                   help="Run for N frames, print smp/bfps stats, then exit")
+    asteroids_parser.add_argument("--log-filter", type=str, default=None,
+                                  metavar="CATS",
+                                  help="Comma-separated log categories to emit: level,collision,spawn,bullet (default: all)")
     asteroids_parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default=None,
                                   help="Game difficulty preset (overridden by explicit args)")
     asteroids_parser.add_argument("--rocks", type=int, default=None,
@@ -508,7 +511,6 @@ def _handle_config(args):
 def main():
     """Main CLI entry point with subcommands."""
     from .logging_setup import setup_logging
-    setup_logging()
 
     parser, subparsers = _build_parser()
 
@@ -524,6 +526,10 @@ def main():
     if args.command == 'config':
         _handle_config(args)
         return
+
+    log_filter = getattr(args, 'log_filter', None)
+    log_cats = [c.strip() for c in log_filter.split(",")] if log_filter else None
+    setup_logging(log_categories=log_cats)
 
     # Print loaded config values so the user can see what's active
     if config:

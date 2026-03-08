@@ -149,8 +149,11 @@ class Ship(Shooter):
             vx = self.bulletVelocity * math.sin(math.radians(self.angle)) * -1
             vy = self.bulletVelocity * math.cos(math.radians(self.angle)) * -1
             heading = Vector2d(vx, vy)
-            Shooter.fireBullet(self, heading, self.bulletTtl, self.bulletVelocity)
-            playSound("fire")
+            fired = Shooter.fireBullet(self, heading, self.bulletTtl, self.bulletVelocity)
+            if fired:
+                playSound("fire")
+            return fired
+        return False
             
     #         
     def enterHyperSpace(self):

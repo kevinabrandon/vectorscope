@@ -168,6 +168,7 @@ class Saucer(Shooter):
         self.laps = 0
         self._last_primary = x if side in ('left', 'right') else y
         self._fire_cooldown = 0.0
+        self.shots_fired = 0
 
         # Scale the shape and create the VectorSprite
         flipped = [(px, -py) for px, py in self.pointlist]
@@ -221,6 +222,7 @@ class Saucer(Shooter):
             position = Vector2d(self.position.x, self.position.y)          
             shotFired = Shooter.fireBullet(self, heading, self.bulletTtl[self.saucerType], self.bulletVelocity)
             if shotFired:
+                self.shots_fired += 1
                 self._fire_cooldown = 30.0
                 playSound("sfire")
             

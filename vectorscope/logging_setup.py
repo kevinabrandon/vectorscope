@@ -25,8 +25,23 @@ class _EventFormatter(logging.Formatter):
         return f"[{ts}] {record.getMessage()}"
 
 
-def setup_logging():
-    """Set up vectorscope loggers. Safe to call multiple times."""
+class _CategoryFilter(logging.Filter):
+    """Only pass records whose 'category' extra matches the allowed set."""
+
+    def __init__(self, categories):
+        super().__init__()
+        self.categories = {c.strip().lower() for c in categories}
+
+    def filter(self, record):
+        return getattr(record, 'category', '') in self.categories
+
+
+def setup_logging(log_categories=None):
+    """Set up vectorscope loggers. Safe to call multiple times.
+
+    log_categories: iterable of category strings to allow (e.g. ['level','spawn']).
+                    None (default) means all categories pass through.
+    """
 
     # Performance logger — JSONL
     perf = logging.getLogger('vectorscope.perf')
@@ -43,6 +58,8 @@ def setup_logging():
     if not game.handlers:
         h = logging.FileHandler("vectorscope_asteroids.log", encoding="utf-8")
         h.setFormatter(_EventFormatter())
+        if log_categories is not None:
+            h.addFilter(_CategoryFilter(log_categories))
         game.addHandler(h)
         game.propagate = False
 
