@@ -235,6 +235,18 @@ class Asteroids:
         self.ship.position.y = safe_y
         self.ship.thrustJet.position.x = safe_x
         self.ship.thrustJet.position.y = safe_y
+
+        # Point ship toward center, snapped to nearest 30-degree step.
+        # Thrust direction at angle α is (-sin α, -cos α); to face center:
+        #   sin α = (safe_x - cx) / dist,  cos α = (safe_y - cy) / dist
+        cx, cy = self.maxc / 2, self.maxc / 2
+        dx, dy = safe_x - cx, safe_y - cy
+        if dx != 0 or dy != 0:
+            raw_deg = math.degrees(math.atan2(dx, dy))
+            snap = 30
+            snapped = round(raw_deg / snap) * snap
+            self.ship.angle = snapped
+            self.ship.thrustJet.angle = snapped
         if self.ship_bullet_speed is not None:
             self.ship.bulletVelocity = self.ship_bullet_speed
         if self.ship_bullet_ttl is not None:
