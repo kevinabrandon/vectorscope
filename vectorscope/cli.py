@@ -275,7 +275,7 @@ def _build_parser():
                                     help="Enable web-based oscilloscope viewer")
     interactive_parser.add_argument("--web-port", type=int, default=8080,
                                     help="Port for web viewer")
-    interactive_parser.add_argument("--web-scale-factor", type=float, default=1.0,
+    interactive_parser.add_argument("--web-scale-factor", type=float, default=2.0,
                                     help="Scale factor for the web viewer")
     interactive_parser.add_argument("--perf-log-period", type=float, default=1.0,
                                     help="Period in seconds for performance logging")

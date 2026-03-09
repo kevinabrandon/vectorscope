@@ -23,7 +23,7 @@ class InteractiveSession:
     """Owns the audio stream and delegates to the current player."""
 
     def __init__(self, parser, subparsers, args, web_port=None, 
-                 web_scale_factor=1.0, perf_log_period=1.0,
+                 web_scale_factor=2.0, perf_log_period=1.0,
                  start_command="circle"):
         self._parser = parser
         self._subparsers = subparsers  # dict: command name -> subparser

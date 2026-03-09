@@ -451,13 +451,15 @@ canvas { display: block; background: #000; border-radius: 2px; }
 
   const offCanvas = document.createElement('canvas');
   const offCtx = offCanvas.getContext('2d');
+  const glowCanvas = document.createElement('canvas');
+  const glowCtx = glowCanvas.getContext('2d');
 
   let channels = 2;
   let zAmp = 1.0;
   let scaleFactor = 1.0;
   let pendingFrames = [];
   let intensityScale = 0.75; // Initial centered value
-  let persistScale = 0.5; // New persistence parameter
+  let persistScale = 0.25; // Initial persistence (half of max)
   let focusScale = 0.0; // 0.0 is focused, higher is blurred
   let voltsX = 0.5;
   let voltsY = 0.5;
@@ -496,6 +498,8 @@ canvas { display: block; background: #000; border-radius: 2px; }
     canvas.height = ch;
     offCanvas.width = cw;
     offCanvas.height = ch;
+    glowCanvas.width = cw;
+    glowCanvas.height = ch;
     
     container.style.padding = `${chassisPad}px`;
     const scopeBody = document.getElementById('scope-body');
@@ -652,7 +656,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
     if (numPts < 2) return;
 
     offCtx.clearRect(0, 0, w, h);
-    offCtx.globalAlpha = Math.min(1, intensityScale);
+    glowCtx.clearRect(0, 0, w, h);
 
     const baseStroke = parseFloat(canvas.dataset.baseStroke || 1.0);
 
@@ -660,85 +664,80 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const scaleY = (0.25 * scaleFactor) / voltsY;
     const coreWidth = baseStroke * 2.0;
 
+    // Dial zones:
+    //   Lower half (0→0.5): ramp brightness — full-intensity objects reach coreAlpha=1 at dial=0.5
+    //   Upper half (0.5→1): core stays clamped at 1, glow blooms as an additive effect
+    const brightness   = Math.min(1, intensityScale * 2);          // 0→1 over lower half
+    const bloomFactor  = Math.max(0, (intensityScale - 0.5) * 2);  // 0→1 over upper half
+
     if (stride < 3) {
-      offCtx.strokeStyle = '#00ff41';
+      // No Z channel — treat as full intensity
+      const coreAlpha = brightness;
+      const glowAlpha = Math.min(1, 0.2 * brightness + 0.7 * bloomFactor);
+      glowCtx.strokeStyle = `rgba(0, 140, 20, ${glowAlpha})`;
+      glowCtx.lineWidth = coreWidth * 5;
+      glowCtx.beginPath();
+      offCtx.strokeStyle = `rgba(0, 255, 65, ${coreAlpha})`;
       offCtx.lineWidth = coreWidth;
       offCtx.beginPath();
       for (let i = 0; i < numPts; i++) {
         const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
         const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
-        if (i === 0) offCtx.moveTo(x, y);
-        else offCtx.lineTo(x, y);
+        if (i === 0) { offCtx.moveTo(x, y); glowCtx.moveTo(x, y); }
+        else          { offCtx.lineTo(x, y); glowCtx.lineTo(x, y); }
       }
       offCtx.stroke();
+      glowCtx.stroke();
     } else {
-      // Z-channel: batch visible segments into subpaths, skip blanked
+      // Z-channel: per-segment two-pass render (core + glow)
+      // Core: full-intensity objects hit alpha=1.0 at dial=0.5; dim objects scale below that.
+      // Glow: modest base halo always present; bloom kicks in above dial=0.5.
       let prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
       let prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
-      let hasPartial = false;
-
-      offCtx.beginPath();
-      let inSub = false;
       for (let i = 1; i < numPts; i++) {
         const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
         const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
         const zRaw = floats[i * stride + 2];
-        
         const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
         const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5));
-        
+
         if (intensity > 0.005) {
-          if (!inSub) { offCtx.moveTo(prevX, prevY); inSub = true; }
+          // Core: (0.55 + 0.45*i) * brightness → full-intensity hits 1.0 at dial=0.5
+          const coreAlpha = Math.min(1, (0.55 + 0.45 * intensity) * brightness);
+          const coreGreen = Math.round(120 + 135 * intensity);
+          offCtx.strokeStyle = `rgba(0, ${coreGreen}, 50, ${coreAlpha})`;
+          offCtx.lineWidth = coreWidth;
+          offCtx.beginPath();
+          offCtx.moveTo(prevX, prevY);
           offCtx.lineTo(x, y);
-          if (intensity < 0.995) hasPartial = true;
-        } else {
-          inSub = false;
+          offCtx.stroke();
+
+          // Glow: base halo scales with brightness; bloom scales with bloomFactor
+          const glowAlpha = Math.min(1, intensity * 0.2 * brightness + intensity * 0.7 * bloomFactor);
+          const glowGreen = Math.round(50 + 90 * intensity);
+          glowCtx.strokeStyle = `rgba(0, ${glowGreen}, 15, ${glowAlpha})`;
+          glowCtx.lineWidth = coreWidth * (2.0 + 5.0 * intensity);
+          glowCtx.beginPath();
+          glowCtx.moveTo(prevX, prevY);
+          glowCtx.lineTo(x, y);
+          glowCtx.stroke();
         }
         prevX = x;
         prevY = y;
       }
-
-      if (!hasPartial && intensityScale >= 0.99) {
-        // All visible at full intensity — batched core (fast path)
-        offCtx.strokeStyle = '#00ff41';
-        offCtx.lineWidth = coreWidth;
-        offCtx.stroke();
-      } else {
-        // Variable intensity — per-segment core
-        prevX = (floats[0] * scaleX + posX + 1) * 0.5 * s + ox;
-        prevY = (1 - (floats[1] * scaleY + posY + 1) * 0.5) * s;
-        for (let i = 1; i < numPts; i++) {
-          const x = (floats[i * stride] * scaleX + posX + 1) * 0.5 * s + ox;
-          const y = (1 - (floats[i * stride + 1] * scaleY + posY + 1) * 0.5) * s;
-          const zRaw = floats[i * stride + 2];
-          
-          const zNorm = Math.max(-1, Math.min(1, zRaw / zAmp));
-          const intensity = Math.max(0, Math.min(1, (1 - zNorm) * 0.5));
-          
-          if (intensity > 0.005) {
-            const adj = Math.min(1, intensity * intensity);
-            const green = Math.round(40 + 215 * adj);
-            const alpha = Math.min(1, 0.03 + 0.97 * adj);
-            
-            // Scaled core width based on per-segment intensity
-            const segCoreWidth = (1.0 + (1.0 * adj)) * (coreWidth / 2.0);
-            
-            offCtx.lineWidth = segCoreWidth;
-            offCtx.strokeStyle = `rgba(0, ${green}, 40, ${alpha})`;
-            offCtx.beginPath();
-            offCtx.moveTo(prevX, prevY);
-            offCtx.lineTo(x, y);
-            offCtx.stroke();
-          }
-          prevX = x;
-          prevY = y;
-        }
-      }
     }
 
-    // Apply the blur ONCE to the entire trace result
-    const blurPx = focusScale * 6.0;
-    ctx.filter = blurPx > 0.1 ? `blur(${blurPx}px)` : 'none';
+    // Composite: glow layer additively (bloom), then core normally on top.
+    // 'lighter' compositing adds glow RGB to existing pixels rather than
+    // alpha-blending — bright areas get brighter, producing real CRT bloom.
+    // The core uses 'source-over' so it draws as a clean sharp beam on top.
+    const glowBlur = Math.max(2.0, coreWidth * 4.0);
+    const focusBlur = focusScale * 6.0;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = `blur(${glowBlur}px)`;
+    ctx.drawImage(glowCanvas, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = focusBlur > 0.1 ? `blur(${focusBlur}px)` : 'none';
     ctx.drawImage(offCanvas, 0, 0);
     ctx.filter = 'none';
   }
@@ -750,10 +749,10 @@ canvas { display: block; background: #000; border-radius: 2px; }
     const dt = lastAnimTime ? (now - lastAnimTime) / 1000 : 0.016;
     lastAnimTime = now;
 
-    // Map persistScale (0.0 to 1.0) to a decay time (seconds)
-    // 0.0 -> ~0.1s (sharp)
-    // 0.5 -> ~1.0s (default-ish)
-    // 1.0 -> ~10.0s (long trail)
+    // Map persistScale (0.0 to 0.5) to a decay time (seconds)
+    // 0.0  -> ~0.1s (sharp)
+    // 0.25 -> ~0.32s (default start)
+    // 0.5  -> ~1.0s (max)
     const decayTime = Math.pow(10, persistScale * 2 - 1); 
     
     // Time-based phosphor decay: fade to near-zero over decayTime
@@ -792,7 +791,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
     if (group && group.dataset.param === 'intensity') {
       intensityScale = (angle + 135) / 270;
     } else if (group && group.dataset.param === 'persist') {
-      persistScale = (angle + 135) / 270;
+      persistScale = (angle + 135) / 270 * 0.5;
     } else if (group && group.dataset.param === 'focus') {
       focusScale = Math.abs(angle) / 135;
     } else if (group && (group.dataset.param === 'volts_x' || group.dataset.param === 'volts_y')) {
