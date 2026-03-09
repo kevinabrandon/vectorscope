@@ -100,7 +100,7 @@ class VectorScopePlayer:
                  noise=0.0, fade_period=10.0, noise_type='white',
                  noise_mode='sum', animate_freq_range=None, freq_sign=1,
                  channels=2, z_amp=1.0, z_delay=0.0, z_blank=True,
-                 z_gamma=1.0, web_port=None, web_scale_factor=1.0,
+                 z_gamma=1.0, web_port=None, web_scale_factor=2.0,
                  perf_log_period=1.0, web_server=None):
         self.sample_rate = sample_rate
         self.freq = abs(freq)
@@ -997,7 +997,7 @@ def add_common_args(parser, freq_default=100, rate_default=48000, include_freq=T
                         help="Enable web-based oscilloscope viewer")
     parser.add_argument("--web-port", type=int, default=8080,
                         help="Port for web viewer")
-    parser.add_argument("--web-scale-factor", type=float, default=1.0,
+    parser.add_argument("--web-scale-factor", type=float, default=2.0,
                         help="Scale factor for the web viewer")
     parser.add_argument("--perf-log-period", type=float, default=1.0,
                         help="Period in seconds for writing performance stats to log")
