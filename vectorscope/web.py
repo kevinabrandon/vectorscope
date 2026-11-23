@@ -844,7 +844,7 @@ canvas { display: block; background: #000; border-radius: 2px; }
 
   function connect() {
     statusEl.textContent = 'connecting...';
-    const ws = new WebSocket(`ws://${location.host}/`);
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`);
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = function() {
